@@ -293,17 +293,21 @@ CUDA_CHECK(cudaMalloc((void**)&d_iev32, sizeof(int)));
     restore_input();
     one_run();
     CUDA_CHECK(cudaDeviceSynchronize());
+    cudaStream_t stream;
+CUDA_CHECK(cudaStreamCreate(&stream));
 
+CUBLAS_CHECK(cublasSetStream(blas, stream));
+CUSOLVER_CHECK(cusolverDnSetStream(solver, stream));
     // Timed trials — factorization passes only.
     EV wall;
-    wall.start();
+    wall.start(stream);
 
     for (int t = 0; t < trials; ++t) {
         restore_input();
         one_run();
     }
 
-    time_s = wall.stop() / trials;
+    time_s = wall.stop(stream) / trials;
 
     // After the final run:
     // A64 = Q1, B64 = Q, Abak = original A0.
@@ -406,11 +410,16 @@ void svqb2_cholqr(const double* h_A, int m, int n,
 
     one_run();
     CUDA_CHECK(cudaDeviceSynchronize());
+cudaStream_t stream;
+CUDA_CHECK(cudaStreamCreate(&stream));
 
-    EV wall; wall.start();
+CUBLAS_CHECK(cublasSetStream(blas, stream));
+CUSOLVER_CHECK(cusolverDnSetStream(solver, stream));
+
+    EV wall; wall.start(stream);
     for (int t = 0; t < trials; ++t) one_run();
     CUDA_CHECK(cudaDeviceSynchronize());
-    time_s = wall.stop() / trials;
+    time_s = wall.stop(stream) / trials;
 
     // R for the original A. This also avoids having to explicitly invert M.
     CUBLAS_CHECK(cublasDgemm(
@@ -478,12 +487,18 @@ void svqb2(const double* h_A, int m, int n,
     one(); CUDA_CHECK(cudaDeviceSynchronize());
 
     // Timed trials (host<->device copies excluded; R recovery included, see above)
-    EV wall; wall.start();
+    cudaStream_t stream;
+CUDA_CHECK(cudaStreamCreate(&stream));
+
+CUBLAS_CHECK(cublasSetStream(blas, stream));
+CUSOLVER_CHECK(cusolverDnSetStream(solver, stream));
+
+    EV wall; wall.start(stream);
     for (int t = 0; t < trials; ++t) {
         thrust::copy(d_Abak.begin(), d_Abak.end(), d_A.begin());
         one();
     }
-    time_s = wall.stop() / trials;
+    time_s = wall.stop(stream) / trials;
 
             // R recovery — TIMED (see "Timing honesty note" above): unlike CholQR2's
         // Cholesky factors, these are not free byproducts of the passes above.
@@ -562,12 +577,18 @@ void svqb3(const double* h_A, int m, int n,
     one(); CUDA_CHECK(cudaDeviceSynchronize());
 
     // Timed trials (host<->device copies excluded; R recovery included, see above)
-    EV wall; wall.start();
+    cudaStream_t stream;
+CUDA_CHECK(cudaStreamCreate(&stream));
+
+CUBLAS_CHECK(cublasSetStream(blas, stream));
+CUSOLVER_CHECK(cusolverDnSetStream(solver, stream));
+
+    EV wall; wall.start(stream);
     for (int t = 0; t < trials; ++t) {
         thrust::copy(d_Abak.begin(), d_Abak.end(), d_A.begin());
         one();
     }
-    time_s = wall.stop() / trials;
+    time_s = wall.stop(stream) / trials;
 
 
             CUBLAS_CHECK(cublasDgemm(blas, CUBLAS_OP_T, CUBLAS_OP_N, n, n, m,

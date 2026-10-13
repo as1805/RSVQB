@@ -21,6 +21,7 @@
 #include <thrust/copy.h>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/random.h>
+#include <thrust/system/cuda/execution_policy.h>
 
 #include <cstdint>
 #include <cstdio>
@@ -147,25 +148,29 @@ static void cholqr_timed(cublasHandle_t blas, cusolverDnHandle_t solver,
     const double a=1., b=0.;
     cublasFillMode_t uplo = CUBLAS_FILL_MODE_UPPER;
     double dt;
+    cudaStream_t stream;
+CUDA_CHECK(cudaStreamCreate(&stream));
 
-    ev.start();
+CUBLAS_CHECK(cublasSetStream(blas, stream));
+CUSOLVER_CHECK(cusolverDnSetStream(solver, stream));
+    ev.start(stream);
     CUBLAS_CHECK(cublasDtrsm(blas, CUBLAS_SIDE_RIGHT, uplo, CUBLAS_OP_N,
                              CUBLAS_DIAG_NON_UNIT, m, n, &a, pG, n, pA, m));
-    dt=ev.stop(); if(rec) t.trsm_pre += dt*1e3;
+    dt=ev.stop(stream); if(rec) t.trsm_pre += dt*1e3;
 
-    ev.start();
+    ev.start(stream);
     CUBLAS_CHECK(cublasDgemm(blas, CUBLAS_OP_T, CUBLAS_OP_N, n, n, m,
                              &a, pA, m, pA, m, &b, pG, n));
-    dt=ev.stop(); if(rec) t.gemm += dt*1e3;
+    dt=ev.stop(stream); if(rec) t.gemm += dt*1e3;
 
-    ev.start();
+    ev.start(stream);
     CUSOLVER_CHECK(cusolverDnDpotrf(solver, uplo, n, pG, n, d_wch, lw_ch, d_ich));
-    dt=ev.stop(); if(rec) t.chol += dt*1e3;
+    dt=ev.stop(stream); if(rec) t.chol += dt*1e3;
 
-    ev.start();
+    ev.start(stream);
     CUBLAS_CHECK(cublasDtrsm(blas, CUBLAS_SIDE_RIGHT, uplo, CUBLAS_OP_N,
                              CUBLAS_DIAG_NON_UNIT, m, n, &a, pG, n, pA, m));
-    dt=ev.stop(); if(rec) t.trsm_fin += dt*1e3;
+    dt=ev.stop(stream); if(rec) t.trsm_fin += dt*1e3;
 }
 
 // ===========================================================================
@@ -209,7 +214,12 @@ static MRCQRTimes profile_fp64(cublasHandle_t blas, cusolverDnHandle_t solver,
     CUSOLVER_CHECK(cusolverDnDpotrf_bufferSize(solver,CUBLAS_FILL_MODE_UPPER,n,pG,n,&lw_ch));
     CUDA_CHECK(cudaMalloc(&d_wch,lw_ch*sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_ich,sizeof(int)));
+cudaStream_t stream;
+CUDA_CHECK(cudaStreamCreate(&stream));
 
+CUBLAS_CHECK(cublasSetStream(blas, stream));
+CUSOLVER_CHECK(cusolverDnSetStream(solver, stream));
+CUFFT_CHECK(cufftSetStream(fp, stream));
     MRCQRTimes t={}; EV ev, wall;
 
     auto one=[&](bool rec){
@@ -220,23 +230,23 @@ static MRCQRTimes profile_fp64(cublasHandle_t blas, cusolverDnHandle_t solver,
         thrust::transform(thrust::counting_iterator<unsigned>(0),
                           thrust::counting_iterator<unsigned>(c),d_S.begin(),RandSamp{m});
 
-        ev.start(); diag_fp64<<<GRD,BLK>>>(pA,pD,pFA,m,n);
-        CUDA_CHECK(cudaGetLastError()); dt=ev.stop(); if(rec) t.diag+=dt*1e3;
+        ev.start(stream); diag_fp64<<<GRD,BLK>>>(pA,pD,pFA,m,n);
+        CUDA_CHECK(cudaGetLastError()); dt=ev.stop(stream); if(rec) t.diag+=dt*1e3;
 
-        ev.start(); CUFFT_CHECK(cufftExecD2Z(fp,pFA,pFft));
-        dt=ev.stop(); if(rec) t.fft+=dt*1e3;
+        ev.start(stream); CUFFT_CHECK(cufftExecD2Z(fp,pFA,pFft));
+        dt=ev.stop(stream); if(rec) t.fft+=dt*1e3;
 
-        ev.start();
+        ev.start(stream);
         thrust::transform(thrust::counting_iterator<int>(0),
                           thrust::counting_iterator<int>(c*n),
                           d_sk.begin(),SelF64{pFft,pS,c,m,half_r});
         thrust::transform(d_sk.begin(),d_sk.end(),d_sk.begin(),
                           [norm]__device__(double x){return x*norm;});
-        dt=ev.stop(); if(rec) t.select+=dt*1e3;
+        dt=ev.stop(stream); if(rec) t.select+=dt*1e3;
 
-        ev.start();
+        ev.start(stream);
         CUSOLVER_CHECK(cusolverDnDgeqrf(solver,c,n,pSk,c,d_tau,d_wsk,lw_sk,d_isk));
-        dt=ev.stop(); if(rec) t.skqr+=dt*1e3;
+        dt=ev.stop(stream); if(rec) t.skqr+=dt*1e3;
 
         thrust::fill(d_RsTR.begin(),d_RsTR.end(),0.);
         thrust::for_each(thrust::counting_iterator<int>(0),
@@ -246,8 +256,8 @@ static MRCQRTimes profile_fp64(cublasHandle_t blas, cusolverDnHandle_t solver,
     };
 
     one(false); CUDA_CHECK(cudaDeviceSynchronize());
-    wall.start(); for(int i=0;i<trials;++i) one(true);
-    t.total=wall.stop()*1e3/trials;
+    wall.start(stream); for(int i=0;i<trials;++i) one(true);
+    t.total=wall.stop(stream)*1e3/trials;
 
     auto avg=[&](double& x){x/=trials;};
     avg(t.diag);avg(t.fft);avg(t.select);avg(t.skqr);
@@ -300,7 +310,12 @@ static MRCQRTimes profile_fp32(cublasHandle_t blas, cusolverDnHandle_t solver,
     CUSOLVER_CHECK(cusolverDnDpotrf_bufferSize(solver,CUBLAS_FILL_MODE_UPPER,n,pG,n,&lw_ch));
     CUDA_CHECK(cudaMalloc(&d_wch,lw_ch*sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_ich,sizeof(int)));
+    cudaStream_t stream;
+CUDA_CHECK(cudaStreamCreate(&stream));
 
+CUBLAS_CHECK(cublasSetStream(blas, stream));
+CUSOLVER_CHECK(cusolverDnSetStream(solver, stream));
+CUFFT_CHECK(cufftSetStream(fp, stream));
     MRCQRTimes t={}; EV ev, wall;
 
     auto one=[&](bool rec){
@@ -311,23 +326,23 @@ static MRCQRTimes profile_fp32(cublasHandle_t blas, cusolverDnHandle_t solver,
         thrust::transform(thrust::counting_iterator<unsigned>(0),
                           thrust::counting_iterator<unsigned>(c),d_S.begin(),RandSamp{m});
 
-        ev.start(); diag_fp32<<<GRD,BLK>>>(pA,pD,pFA,m,n);
-        CUDA_CHECK(cudaGetLastError()); dt=ev.stop(); if(rec) t.diag+=dt*1e3;
+        ev.start(stream); diag_fp32<<<GRD,BLK>>>(pA,pD,pFA,m,n);
+        CUDA_CHECK(cudaGetLastError()); dt=ev.stop(stream); if(rec) t.diag+=dt*1e3;
 
-        ev.start(); CUFFT_CHECK(cufftExecR2C(fp,pFA,pFft));
-        dt=ev.stop(); if(rec) t.fft+=dt*1e3;
+        ev.start(stream); CUFFT_CHECK(cufftExecR2C(fp,pFA,pFft));
+        dt=ev.stop(stream); if(rec) t.fft+=dt*1e3;
 
-        ev.start();
+        ev.start(stream);
         thrust::transform(thrust::counting_iterator<int>(0),
                           thrust::counting_iterator<int>(c*n),
                           d_sk.begin(),SelF32{pFft,pS,c,m,half_r});
         thrust::transform(d_sk.begin(),d_sk.end(),d_sk.begin(),
                           [normf]__device__(float x){return x*normf;});
-        dt=ev.stop(); if(rec) t.select+=dt*1e3;
+        dt=ev.stop(stream); if(rec) t.select+=dt*1e3;
 
-        ev.start();
+        ev.start(stream);
         CUSOLVER_CHECK(cusolverDnSgeqrf(solver,c,n,pSk,c,d_tau,d_wsk,lw_sk,d_isk));
-        dt=ev.stop(); if(rec) t.skqr+=dt*1e3;
+        dt=ev.stop(stream); if(rec) t.skqr+=dt*1e3;
 
         thrust::fill(d_RsTR.begin(),d_RsTR.end(),0.);
         thrust::for_each(thrust::counting_iterator<int>(0),
@@ -337,8 +352,8 @@ static MRCQRTimes profile_fp32(cublasHandle_t blas, cusolverDnHandle_t solver,
     };
 
     one(false); CUDA_CHECK(cudaDeviceSynchronize());
-    wall.start(); for(int i=0;i<trials;++i) one(true);
-    t.total=wall.stop()*1e3/trials;
+    wall.start(stream); for(int i=0;i<trials;++i) one(true);
+    t.total=wall.stop(stream)*1e3/trials;
 
     auto avg=[&](double& x){x/=trials;};
     avg(t.diag);avg(t.fft);avg(t.select);avg(t.skqr);
@@ -394,6 +409,12 @@ static MRCQRTimes profile_fp16(cublasHandle_t blas, cusolverDnHandle_t solver,
     CUDA_CHECK(cudaMalloc(&d_wch,lw_ch*sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_ich,sizeof(int)));
 
+    cudaStream_t stream;
+CUDA_CHECK(cudaStreamCreate(&stream));
+
+CUBLAS_CHECK(cublasSetStream(blas, stream));
+CUSOLVER_CHECK(cusolverDnSetStream(solver, stream));
+CUFFT_CHECK(cufftSetStream(fp, stream));
     MRCQRTimes t={}; EV ev, wall;
 
     auto one=[&](bool rec){
@@ -404,24 +425,24 @@ static MRCQRTimes profile_fp16(cublasHandle_t blas, cusolverDnHandle_t solver,
         thrust::transform(thrust::counting_iterator<unsigned>(0),
                           thrust::counting_iterator<unsigned>(c),d_S.begin(),RandSamp{m});
 
-        ev.start(); diag_fp16<<<GRD,BLK>>>(pA,pD,pFA,m,n);
-        CUDA_CHECK(cudaGetLastError()); dt=ev.stop(); if(rec) t.diag+=dt*1e3;
+        ev.start(stream); diag_fp16<<<GRD,BLK>>>(pA,pD,pFA,m,n);
+        CUDA_CHECK(cudaGetLastError()); dt=ev.stop(stream); if(rec) t.diag+=dt*1e3;
 
-        ev.start();
+        ev.start(stream);
         CUFFT_CHECK(cufftXtExec(fp,(void*)pFA,(void*)pFft,CUFFT_FORWARD));
-        dt=ev.stop(); if(rec) t.fft+=dt*1e3;
+        dt=ev.stop(stream); if(rec) t.fft+=dt*1e3;
 
-        ev.start();
+        ev.start(stream);
         thrust::transform(thrust::counting_iterator<int>(0),
                           thrust::counting_iterator<int>(c*n),
                           d_sk.begin(),SelF16{pFft,pS,c,m,half_r});
         thrust::transform(d_sk.begin(),d_sk.end(),d_sk.begin(),
                           [normf]__device__(float x){return x*normf;});
-        dt=ev.stop(); if(rec) t.select+=dt*1e3;
+        dt=ev.stop(stream); if(rec) t.select+=dt*1e3;
 
-        ev.start();
+        ev.start(stream);
         CUSOLVER_CHECK(cusolverDnSgeqrf(solver,c,n,pSk,c,d_tau,d_wsk,lw_sk,d_isk));
-        dt=ev.stop(); if(rec) t.skqr+=dt*1e3;
+        dt=ev.stop(stream); if(rec) t.skqr+=dt*1e3;
 
         thrust::fill(d_RsTR.begin(),d_RsTR.end(),0.);
         thrust::for_each(thrust::counting_iterator<int>(0),
@@ -431,8 +452,8 @@ static MRCQRTimes profile_fp16(cublasHandle_t blas, cusolverDnHandle_t solver,
     };
 
     one(false); CUDA_CHECK(cudaDeviceSynchronize());
-    wall.start(); for(int i=0;i<trials;++i) one(true);
-    t.total=wall.stop()*1e3/trials;
+    wall.start(stream); for(int i=0;i<trials;++i) one(true);
+    t.total=wall.stop(stream)*1e3/trials;
 
     auto avg=[&](double& x){x/=trials;};
     avg(t.diag);avg(t.fft);avg(t.select);avg(t.skqr);
@@ -533,44 +554,52 @@ static MRSQRTimes profile_mrsqr(cublasHandle_t blas, cusolverDnHandle_t solver,
     CUDA_CHECK(cudaMalloc(&d_wev,lw_ev*sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_iev,sizeof(int)));
 
-    MRSQRTimes t={}; EV ev, wall;
-    auto one_trial=[&](bool rec) {
-        thrust::copy(d_Abak.begin(),d_Abak.begin()+(long long)m*n,d_A.begin());
-        pA=thrust::raw_pointer_cast(d_A.data());
-        double dt;
+    cudaStream_t stream;
+CUDA_CHECK(cudaStreamCreate(&stream));
 
-        thrust::transform(thrust::counting_iterator<unsigned>(0),
+CUBLAS_CHECK(cublasSetStream(blas, stream));
+CUSOLVER_CHECK(cusolverDnSetStream(solver, stream));
+CUFFT_CHECK(cufftSetStream(fp, stream));
+    MRSQRTimes t={}; EV ev, wall;
+    auto policy=thrust::cuda::par.on(stream);
+    auto one_trial=[&](bool rec) {
+        thrust::copy(policy,d_Abak.begin(),d_Abak.begin()+(long long)m*n,d_A.begin());
+        pA=thrust::raw_pointer_cast(d_A.data());
+        thrust::transform(policy,thrust::counting_iterator<unsigned>(0),
                           thrust::counting_iterator<unsigned>(m),d_D.begin(),RandRadI8());
-        thrust::transform(thrust::counting_iterator<unsigned>(0),
+        thrust::transform(policy,thrust::counting_iterator<unsigned>(0),
                           thrust::counting_iterator<unsigned>(c),d_S.begin(),RandSamp{m});
 
-        ev.start();
+        if(rec) ev.start(stream);
         diag_fp64<<<GRD,BLK>>>(pA,pD,pFA,m,n);
         CUDA_CHECK(cudaGetLastError());
-        dt=ev.stop(); if(rec) t.diag+=dt*1e3;
+        if(rec) t.diag+=ev.stop(stream)*1e3;
 
-        ev.start();
+        if(rec) ev.start(stream);
         CUFFT_CHECK(cufftExecD2Z(fp,pFA,pFft));
-        dt=ev.stop(); if(rec) t.fft+=dt*1e3;
+        if(rec) t.fft+=ev.stop(stream)*1e3;
 
-        ev.start();
-        thrust::transform(thrust::counting_iterator<int>(0),
+        if(rec) ev.start(stream);
+        thrust::transform(policy,thrust::counting_iterator<int>(0),
                           thrust::counting_iterator<int>(c*n),d_sk.begin(),
                           SelF64{pFft,pS,c,m,half_r});
-        thrust::transform(d_sk.begin(),d_sk.end(),d_sk.begin(),
+        thrust::transform(policy,d_sk.begin(),d_sk.end(),d_sk.begin(),
                           [norm]__device__(double x){return x*norm;});
-        dt=ev.stop(); if(rec) t.select+=dt*1e3;
+        if(rec) t.select+=ev.stop(stream)*1e3;
 
-        ev.start();
-        if (svd_kind == ProfileSvd::Gesvd) {
+        if(rec) ev.start(stream);
+if (svd_kind == ProfileSvd::Gesvd) {
+            
             CUSOLVER_CHECK(cusolverDnDgesvd(solver,'N','A',c,n,pSk,c,pSigma,
                                             nullptr,1,pVT,n,d_wsvd,lw_svd,
                                             nullptr,&svd_info));
         } else if (svd_kind == ProfileSvd::Gesvdj) {
+            
             CUSOLVER_CHECK(cusolverDnDgesvdj(
                 solver,CUSOLVER_EIG_MODE_VECTOR,1,c,n,pSk,c,pSigma,
                 pA1,m,pVT,n,d_wsvd,lw_svd,p_svd_info,gesvdj_params));
         } else {
+        
             CUSOLVER_CHECK(cusolverDnXgesvdp(
                 solver,gesvdp_params,CUSOLVER_EIG_MODE_VECTOR,1,c,n,
                 CUDA_R_64F,pSk,c,CUDA_R_64F,pSigma,CUDA_R_64F,pA1,m,
@@ -578,47 +607,48 @@ static MRSQRTimes profile_mrsqr(cublasHandle_t blas, cusolverDnHandle_t solver,
                 gesvdp_device_bytes,h_gesvdp_work.data(),gesvdp_host_bytes,
                 p_svd_info,&gesvdp_err_sigma));
         }
-        dt=ev.stop(); if(rec) t.svd+=dt*1e3;
+            if(!rec) CUDA_CHECK(cudaDeviceSynchronize());
+            if(rec) t.svd+=ev.stop(stream)*1e3;
 
-        ev.start();
+            if(rec) ev.start(stream);
         CUBLAS_CHECK(cublasDgemm(blas,CUBLAS_OP_N,
                      svd_kind == ProfileSvd::Gesvd ? CUBLAS_OP_T : CUBLAS_OP_N,
                                  m,n,n,
                                  &one,pA,m,pVT,n,&zero,pA1,m));
-        dt=ev.stop(); if(rec) t.pre_gemm+=dt*1e3;
+        if(rec) t.pre_gemm+=ev.stop(stream)*1e3;
 
-        ev.start();
-        thrust::transform(thrust::counting_iterator<int>(0),
+        if(rec) ev.start(stream);
+        thrust::transform(policy,thrust::counting_iterator<int>(0),
                           thrust::counting_iterator<int>(m*n),d_A1.begin(),
                           [pA1,pSigma,m]__device__(int k){
                               return pA1[k]/pSigma[k/m];
                           });
-        dt=ev.stop(); if(rec) t.pre_scale+=dt*1e3;
+        if(rec) t.pre_scale+=ev.stop(stream)*1e3;
 
         if (!use_svqb_postprocess) {
-            ev.start();
+            if(rec) ev.start(stream);
             CUBLAS_CHECK(cublasDgemm(blas,CUBLAS_OP_T,CUBLAS_OP_N,n,n,m,
                                      &one,pA1,m,pA1,m,&zero,pG,n));
-            dt=ev.stop(); if(rec) t.chol_gemm+=dt*1e3;
+            if(rec) t.chol_gemm+=ev.stop(stream)*1e3;
 
-            ev.start();
+            if(rec) ev.start(stream);
             CUSOLVER_CHECK(cusolverDnDpotrf(solver,CUBLAS_FILL_MODE_UPPER,
                                              n,pG,n,d_wch,lw_ch,d_ich));
-            dt=ev.stop(); if(rec) t.chol+=dt*1e3;
+            if(rec) t.chol+=ev.stop(stream)*1e3;
 
-            ev.start();
+            if(rec) ev.start(stream);
             CUBLAS_CHECK(cublasDtrsm(blas,CUBLAS_SIDE_RIGHT,
                                      CUBLAS_FILL_MODE_UPPER,CUBLAS_OP_N,
                                      CUBLAS_DIAG_NON_UNIT,m,n,&one,pG,n,pA1,m));
-            dt=ev.stop(); if(rec) t.chol_trsm+=dt*1e3;
+            if(rec) t.chol_trsm+=ev.stop(stream)*1e3;
         } else {
-            ev.start();
+            if(rec) ev.start(stream);
             CUBLAS_CHECK(cublasDgemm(blas,CUBLAS_OP_T,CUBLAS_OP_N,n,n,m,
                                      &one,pA1,m,pA1,m,&zero,pG,n));
-            dt=ev.stop(); if(rec) t.svqb_gram+=dt*1e3;
+            if(rec) t.svqb_gram+=ev.stop(stream)*1e3;
 
-            ev.start();
-            thrust::for_each(thrust::counting_iterator<int>(0),
+            if(rec) ev.start(stream);
+            thrust::for_each(policy,thrust::counting_iterator<int>(0),
                              thrust::counting_iterator<int>(n),
                              [pG,pDinv,n]__device__(int i) {
                                  double v=pG[i+n*i];
@@ -626,36 +656,40 @@ static MRSQRTimes profile_mrsqr(cublasHandle_t blas, cusolverDnHandle_t solver,
                              });
             CUBLAS_CHECK(cublasDdgmm(blas,CUBLAS_SIDE_LEFT,n,n,pG,n,pDinv,1,pG,n));
             CUBLAS_CHECK(cublasDdgmm(blas,CUBLAS_SIDE_RIGHT,n,n,pG,n,pDinv,1,pG,n));
-            dt=ev.stop(); if(rec) t.svqb_norm+=dt*1e3;
+            if(rec) t.svqb_norm+=ev.stop(stream)*1e3;
 
-            ev.start();
+            if(rec) ev.start(stream);
             CUSOLVER_CHECK(cusolverDnDsyevd(solver,CUSOLVER_EIG_MODE_VECTOR,
                                              CUBLAS_FILL_MODE_LOWER,n,pG,n,
                                              pEig,d_wev,lw_ev,d_iev));
             double maxeig;
             CUDA_CHECK(cudaMemcpy(&maxeig,pEig+n-1,sizeof(double),cudaMemcpyDeviceToHost));
-            thrust::transform(thrust::device_pointer_cast(pEig),
+            thrust::transform(policy,thrust::device_pointer_cast(pEig),
                               thrust::device_pointer_cast(pEig)+n,
                               thrust::device_pointer_cast(pRsqrt),
                               [maxeig]__device__(double s){
                                   double floor_=maxeig*1e-15;
                                   return 1./sqrt(max(s,floor_));
                               });
-            dt=ev.stop(); if(rec) t.svqb_eig+=dt*1e3;
+            if(rec) t.svqb_eig+=ev.stop(stream)*1e3;
 
-            ev.start();
+            if(rec) ev.start(stream);
             CUBLAS_CHECK(cublasDdgmm(blas,CUBLAS_SIDE_RIGHT,n,n,pG,n,pRsqrt,1,pM,n));
             CUBLAS_CHECK(cublasDdgmm(blas,CUBLAS_SIDE_LEFT,n,n,pM,n,pDinv,1,pM,n));
             CUBLAS_CHECK(cublasDgemm(blas,CUBLAS_OP_N,CUBLAS_OP_N,m,n,n,
                                      &one,pA1,m,pM,n,&zero,pB,m));
-            dt=ev.stop(); if(rec) t.svqb_apply+=dt*1e3;
+            if(rec) t.svqb_apply+=ev.stop(stream)*1e3;
         }
+        if(!rec) CUDA_CHECK(cudaDeviceSynchronize());
     };
 
     one_trial(false); CUDA_CHECK(cudaDeviceSynchronize());
-    wall.start();
+    // Stage-event synchronization perturbs wall time, so measure total separately.
+    wall.start(stream);
+    for (int i=0;i<trials;++i) one_trial(false);
+    t.total=wall.stop(stream)*1e3/trials;
+
     for (int i=0;i<trials;++i) one_trial(true);
-    t.total=wall.stop()*1e3/trials;
 
     auto avg=[&](double& x){x/=trials;};
     avg(t.diag); avg(t.fft); avg(t.select); avg(t.svd);
@@ -668,6 +702,222 @@ static MRSQRTimes profile_mrsqr(cublasHandle_t blas, cusolverDnHandle_t solver,
     if (gesvdj_params) CUSOLVER_CHECK(cusolverDnDestroyGesvdjInfo(gesvdj_params));
     if (gesvdp_params) CUSOLVER_CHECK(cusolverDnDestroyParams(gesvdp_params));
     cudaFree(d_wev); cudaFree(d_iev);
+    return t;
+}
+
+static MRSQRTimes profile_mrsqr_fp32(cublasHandle_t blas, cusolverDnHandle_t solver,
+                                     thrust::device_vector<double>& d_A,
+                                     const thrust::device_vector<double>& d_Abak,
+                                     int m, int n, int trials, ProfileSvd svd_kind)
+{
+    const int c=3*n, half_r=m/2+1;
+    const float norm=(float)std::sqrt((double)c/m);
+    const int BLK=256, GRD=(int)std::min(65535LL,((long long)m*n+BLK-1)/BLK);
+    const double one=1., zero=0.;
+
+    thrust::device_vector<int8_t> d_D(m);
+    thrust::device_vector<int> d_S(c);
+    thrust::device_vector<float> d_FA((long long)m*n), d_sk((long long)c*n);
+    thrust::device_vector<cufftComplex> d_fft((long long)n*half_r);
+    thrust::device_vector<float> d_VT_f32((long long)n*n), d_sigma_f32(n);
+    thrust::device_vector<float> d_U_f32((long long)c*n), d_P_f32((long long)n*n);
+    thrust::device_vector<double> d_P((long long)n*n), d_A1((long long)m*n);
+    thrust::device_vector<double> d_B((long long)m*n);
+    thrust::device_vector<double> d_G(n*n), d_M(n*n), d_eig(n), d_Dinv(n), d_rsqrt(n);
+
+    int8_t* pD=thrust::raw_pointer_cast(d_D.data());
+    int* pS=thrust::raw_pointer_cast(d_S.data());
+    float* pFA=thrust::raw_pointer_cast(d_FA.data());
+    float* pSk=thrust::raw_pointer_cast(d_sk.data());
+    auto* pFft=thrust::raw_pointer_cast(d_fft.data());
+    float* pVT=thrust::raw_pointer_cast(d_VT_f32.data());
+    float* pSigma=thrust::raw_pointer_cast(d_sigma_f32.data());
+    float* pU=thrust::raw_pointer_cast(d_U_f32.data());
+    float* pP32=thrust::raw_pointer_cast(d_P_f32.data());
+    double* pP=thrust::raw_pointer_cast(d_P.data());
+    double* pA1=thrust::raw_pointer_cast(d_A1.data());
+    double* pB=thrust::raw_pointer_cast(d_B.data());
+    double* pG=thrust::raw_pointer_cast(d_G.data());
+    double* pM=thrust::raw_pointer_cast(d_M.data());
+    double* pEig=thrust::raw_pointer_cast(d_eig.data());
+    double* pDinv=thrust::raw_pointer_cast(d_Dinv.data());
+    double* pRsqrt=thrust::raw_pointer_cast(d_rsqrt.data());
+
+    cufftHandle fp;
+    int fn[1]={m};
+    CUFFT_CHECK(cufftPlanMany(&fp,1,fn,fn,1,m,fn,1,half_r,CUFFT_R2C,n));
+
+    int lw_svd=0;
+    float* d_wsvd=nullptr;
+    gesvdjInfo_t gesvdj_params=nullptr;
+    cusolverDnParams_t gesvdp_params=nullptr;
+    size_t gesvdp_device_bytes=0, gesvdp_host_bytes=0;
+    void* d_gesvdp_work=nullptr;
+    std::vector<unsigned char> h_gesvdp_work;
+    thrust::device_vector<int> d_svd_info(1);
+    int* p_svd_info=thrust::raw_pointer_cast(d_svd_info.data());
+    int svd_info=0;
+    double gesvdp_err_sigma=0.;
+
+    if (svd_kind==ProfileSvd::Gesvd) {
+        CUSOLVER_CHECK(cusolverDnSgesvd_bufferSize(solver,c,n,&lw_svd));
+        CUDA_CHECK(cudaMalloc(&d_wsvd,lw_svd*sizeof(float)));
+    } else if (svd_kind==ProfileSvd::Gesvdj) {
+        CUSOLVER_CHECK(cusolverDnCreateGesvdjInfo(&gesvdj_params));
+        CUSOLVER_CHECK(cusolverDnXgesvdjSetTolerance(gesvdj_params,1e-7));
+        CUSOLVER_CHECK(cusolverDnXgesvdjSetMaxSweeps(gesvdj_params,20));
+        CUSOLVER_CHECK(cusolverDnSgesvdj_bufferSize(
+            solver,CUSOLVER_EIG_MODE_VECTOR,1,c,n,pSk,c,pSigma,pU,c,pVT,n,
+            &lw_svd,gesvdj_params));
+        CUDA_CHECK(cudaMalloc(&d_wsvd,lw_svd*sizeof(float)));
+    } else {
+        CUSOLVER_CHECK(cusolverDnCreateParams(&gesvdp_params));
+        CUSOLVER_CHECK(cusolverDnXgesvdp_bufferSize(
+            solver,gesvdp_params,CUSOLVER_EIG_MODE_VECTOR,1,c,n,
+            CUDA_R_32F,pSk,c,CUDA_R_32F,pSigma,CUDA_R_32F,pU,c,
+            CUDA_R_32F,pVT,n,CUDA_R_32F,
+            &gesvdp_device_bytes,&gesvdp_host_bytes));
+        CUDA_CHECK(cudaMalloc(&d_gesvdp_work,gesvdp_device_bytes));
+        h_gesvdp_work.resize(gesvdp_host_bytes);
+    }
+
+    int lw_ev=0;
+    double* d_wev=nullptr;
+    int* d_iev=nullptr;
+    CUSOLVER_CHECK(cusolverDnDsyevd_bufferSize(
+        solver,CUSOLVER_EIG_MODE_VECTOR,CUBLAS_FILL_MODE_LOWER,n,pG,n,pEig,&lw_ev));
+    CUDA_CHECK(cudaMalloc(&d_wev,lw_ev*sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_iev,sizeof(int)));
+
+    cudaStream_t stream;
+    CUDA_CHECK(cudaStreamCreate(&stream));
+    CUBLAS_CHECK(cublasSetStream(blas,stream));
+    CUSOLVER_CHECK(cusolverDnSetStream(solver,stream));
+    CUFFT_CHECK(cufftSetStream(fp,stream));
+    auto policy=thrust::cuda::par.on(stream);
+    MRSQRTimes t={};
+    EV ev,wall;
+
+    auto one_trial=[&](bool rec) {
+        thrust::copy(policy,d_Abak.begin(),d_Abak.begin()+(long long)m*n,d_A.begin());
+        double* pA=thrust::raw_pointer_cast(d_A.data());
+        thrust::transform(policy,thrust::counting_iterator<unsigned>(0),
+                          thrust::counting_iterator<unsigned>(m),d_D.begin(),RandRadI8());
+        thrust::transform(policy,thrust::counting_iterator<unsigned>(0),
+                          thrust::counting_iterator<unsigned>(c),d_S.begin(),RandSamp{m});
+
+        if(rec) ev.start(stream);
+        diag_fp32<<<GRD,BLK>>>(pA,pD,pFA,m,n);
+        CUDA_CHECK(cudaGetLastError());
+        if(rec) t.diag+=ev.stop(stream)*1e3;
+
+        if(rec) ev.start(stream);
+        CUFFT_CHECK(cufftExecR2C(fp,pFA,pFft));
+        if(rec) t.fft+=ev.stop(stream)*1e3;
+
+        if(rec) ev.start(stream);
+        thrust::transform(policy,thrust::counting_iterator<int>(0),
+                          thrust::counting_iterator<int>(c*n),d_sk.begin(),
+                          SelF32{pFft,pS,c,m,half_r});
+        thrust::transform(policy,d_sk.begin(),d_sk.end(),d_sk.begin(),
+                          [norm] __device__ (float x) { return x*norm; });
+        if(rec) t.select+=ev.stop(stream)*1e3;
+
+        if(rec) ev.start(stream);
+        if(svd_kind==ProfileSvd::Gesvd) {
+            CUSOLVER_CHECK(cusolverDnSgesvd(
+                solver,'N','A',c,n,pSk,c,pSigma,nullptr,1,pVT,n,d_wsvd,lw_svd,
+                nullptr,&svd_info));
+        } else if(svd_kind==ProfileSvd::Gesvdj) {
+            CUSOLVER_CHECK(cusolverDnSgesvdj(
+                solver,CUSOLVER_EIG_MODE_VECTOR,1,c,n,pSk,c,pSigma,pU,c,pVT,n,
+                d_wsvd,lw_svd,p_svd_info,gesvdj_params));
+        } else {
+            CUSOLVER_CHECK(cusolverDnXgesvdp(
+                solver,gesvdp_params,CUSOLVER_EIG_MODE_VECTOR,1,c,n,
+                CUDA_R_32F,pSk,c,CUDA_R_32F,pSigma,CUDA_R_32F,pU,c,
+                CUDA_R_32F,pVT,n,CUDA_R_32F,d_gesvdp_work,gesvdp_device_bytes,
+                h_gesvdp_work.data(),gesvdp_host_bytes,p_svd_info,&gesvdp_err_sigma));
+        }
+        if(rec) t.svd+=ev.stop(stream)*1e3;
+        else CUDA_CHECK(cudaDeviceSynchronize());
+
+        if(rec) ev.start(stream);
+        const bool gesvd_output_is_vt=(svd_kind==ProfileSvd::Gesvd);
+        thrust::transform(policy,thrust::counting_iterator<int>(0),
+                          thrust::counting_iterator<int>(n*n),d_P_f32.begin(),
+                          [pVT,pSigma,n,gesvd_output_is_vt] __device__ (int k) {
+                              const int col=k/n;
+                              const int source=gesvd_output_is_vt ? col+n*(k%n) : k;
+                              return pVT[source]/pSigma[col];
+                          });
+        thrust::transform(policy,d_P_f32.begin(),d_P_f32.end(),d_P.begin(),
+                          [] __device__ (float x) { return (double)x; });
+        if(rec) t.pre_scale+=ev.stop(stream)*1e3;
+
+        if(rec) ev.start(stream);
+        CUBLAS_CHECK(cublasDgemm(blas,CUBLAS_OP_N,CUBLAS_OP_N,m,n,n,
+                                 &one,pA,m,pP,n,&zero,pA1,m));
+        if(rec) t.pre_gemm+=ev.stop(stream)*1e3;
+
+        if(rec) ev.start(stream);
+        CUBLAS_CHECK(cublasDgemm(blas,CUBLAS_OP_T,CUBLAS_OP_N,n,n,m,
+                                 &one,pA1,m,pA1,m,&zero,pG,n));
+        if(rec) t.svqb_gram+=ev.stop(stream)*1e3;
+
+        if(rec) ev.start(stream);
+        thrust::for_each(policy,thrust::counting_iterator<int>(0),
+                         thrust::counting_iterator<int>(n),
+                         [pG,pDinv,n] __device__ (int i) {
+                             const double v=pG[i+n*i];
+                             pDinv[i]=(v>0.)?1./sqrt(v):1.;
+                         });
+        CUBLAS_CHECK(cublasDdgmm(blas,CUBLAS_SIDE_LEFT,n,n,pG,n,pDinv,1,pG,n));
+        CUBLAS_CHECK(cublasDdgmm(blas,CUBLAS_SIDE_RIGHT,n,n,pG,n,pDinv,1,pG,n));
+        if(rec) t.svqb_norm+=ev.stop(stream)*1e3;
+
+        if(rec) ev.start(stream);
+        CUSOLVER_CHECK(cusolverDnDsyevd(
+            solver,CUSOLVER_EIG_MODE_VECTOR,CUBLAS_FILL_MODE_LOWER,n,pG,n,
+            pEig,d_wev,lw_ev,d_iev));
+        double maxeig;
+        CUDA_CHECK(cudaMemcpy(&maxeig,pEig+n-1,sizeof(double),cudaMemcpyDeviceToHost));
+        thrust::transform(policy,thrust::device_pointer_cast(pEig),
+                          thrust::device_pointer_cast(pEig)+n,
+                          thrust::device_pointer_cast(pRsqrt),
+                          [maxeig] __device__ (double s) {
+                              return 1./sqrt(max(s,maxeig*1e-15));
+                          });
+        if(rec) t.svqb_eig+=ev.stop(stream)*1e3;
+
+        if(rec) ev.start(stream);
+        CUBLAS_CHECK(cublasDdgmm(blas,CUBLAS_SIDE_RIGHT,n,n,pG,n,pRsqrt,1,pM,n));
+        CUBLAS_CHECK(cublasDdgmm(blas,CUBLAS_SIDE_LEFT,n,n,pM,n,pDinv,1,pM,n));
+        CUBLAS_CHECK(cublasDgemm(blas,CUBLAS_OP_N,CUBLAS_OP_N,m,n,n,
+                                 &one,pA1,m,pM,n,&zero,pB,m));
+        if(rec) t.svqb_apply+=ev.stop(stream)*1e3;
+    };
+
+    one_trial(false);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    wall.start(stream);
+    for(int i=0;i<trials;++i) one_trial(false);
+    t.total=wall.stop(stream)*1e3/trials;
+    for(int i=0;i<trials;++i) one_trial(true);
+
+    auto avg=[&](double& x){x/=trials;};
+    avg(t.diag); avg(t.fft); avg(t.select); avg(t.svd);
+    avg(t.pre_gemm); avg(t.pre_scale);
+    avg(t.svqb_gram); avg(t.svqb_norm); avg(t.svqb_eig); avg(t.svqb_apply);
+
+    cufftDestroy(fp);
+    cudaFree(d_wsvd);
+    cudaFree(d_gesvdp_work);
+    if(gesvdj_params) CUSOLVER_CHECK(cusolverDnDestroyGesvdjInfo(gesvdj_params));
+    if(gesvdp_params) CUSOLVER_CHECK(cusolverDnDestroyParams(gesvdp_params));
+    cudaFree(d_wev);
+    cudaFree(d_iev);
+    CUDA_CHECK(cudaStreamDestroy(stream));
     return t;
 }
 
@@ -704,36 +954,42 @@ static MREigTimes profile_mreig_svqb(cublasHandle_t blas, cusolverDnHandle_t sol
     CUSOLVER_CHECK(cusolverDnDsyevd_bufferSize(solver,CUSOLVER_EIG_MODE_VECTOR,
                                                CUBLAS_FILL_MODE_LOWER,n,pG,n,pEig,&lwsv));
     CUDA_CHECK(cudaMalloc(&d_wsv,lwsv*sizeof(double))); CUDA_CHECK(cudaMalloc(&d_isv,sizeof(int)));
+    cudaStream_t stream;
+CUDA_CHECK(cudaStreamCreate(&stream));
+
+CUBLAS_CHECK(cublasSetStream(blas, stream));
+CUSOLVER_CHECK(cusolverDnSetStream(solver, stream));
+CUFFT_CHECK(cufftSetStream(fp, stream));
     MREigTimes t={}; EV ev,wall;
     auto one_trial=[&](bool rec){
         thrust::copy(d_Abak.begin(),d_Abak.begin()+(long long)m*n,d_A.begin());
         double dt; pA=thrust::raw_pointer_cast(d_A.data());
         thrust::transform(thrust::counting_iterator<unsigned>(0),thrust::counting_iterator<unsigned>(m),d_D.begin(),RandRadI8());
         thrust::transform(thrust::counting_iterator<unsigned>(0),thrust::counting_iterator<unsigned>(c),d_S.begin(),RandSamp{m});
-        ev.start(); diag_fp64<<<GRD,BLK>>>(pA,pD,pFA,m,n); CUDA_CHECK(cudaGetLastError()); dt=ev.stop(); if(rec)t.diag+=dt*1e3;
-        ev.start(); CUFFT_CHECK(cufftExecD2Z(fp,pFA,pFft)); dt=ev.stop(); if(rec)t.fft+=dt*1e3;
-        ev.start(); thrust::transform(thrust::counting_iterator<int>(0),thrust::counting_iterator<int>(c*n),d_sk.begin(),SelF64{pFft,pS,c,m,half_r});
+        ev.start(stream); diag_fp64<<<GRD,BLK>>>(pA,pD,pFA,m,n); CUDA_CHECK(cudaGetLastError()); dt=ev.stop(stream); if(rec)t.diag+=dt*1e3;
+        ev.start(stream); CUFFT_CHECK(cufftExecD2Z(fp,pFA,pFft)); dt=ev.stop(stream); if(rec)t.fft+=dt*1e3;
+        ev.start(stream); thrust::transform(thrust::counting_iterator<int>(0),thrust::counting_iterator<int>(c*n),d_sk.begin(),SelF64{pFft,pS,c,m,half_r});
         thrust::transform(d_sk.begin(),d_sk.end(),d_sk.begin(),[norm]__device__(double x){return x*norm;});
-        dt=ev.stop(); if(rec)t.select+=dt*1e3;
-        ev.start(); CUBLAS_CHECK(cublasDgemm(blas,CUBLAS_OP_T,CUBLAS_OP_N,n,n,c,&one,pSk,c,pSk,c,&zero,pSkG,n)); dt=ev.stop(); if(rec)t.gram+=dt*1e3;
-        ev.start(); CUSOLVER_CHECK(cusolverDnDsyevd(solver,CUSOLVER_EIG_MODE_VECTOR,CUBLAS_FILL_MODE_LOWER,n,pSkG,n,pEig,d_work,lw,d_info));
+        dt=ev.stop(stream); if(rec)t.select+=dt*1e3;
+        ev.start(stream); CUBLAS_CHECK(cublasDgemm(blas,CUBLAS_OP_T,CUBLAS_OP_N,n,n,c,&one,pSk,c,pSk,c,&zero,pSkG,n)); dt=ev.stop(stream); if(rec)t.gram+=dt*1e3;
+        ev.start(stream); CUSOLVER_CHECK(cusolverDnDsyevd(solver,CUSOLVER_EIG_MODE_VECTOR,CUBLAS_FILL_MODE_LOWER,n,pSkG,n,pEig,d_work,lw,d_info));
         double maxeig; CUDA_CHECK(cudaMemcpy(&maxeig,pEig+n-1,sizeof(double),cudaMemcpyDeviceToHost));
         thrust::transform(thrust::device_pointer_cast(pEig),thrust::device_pointer_cast(pEig)+n,thrust::device_pointer_cast(pInv),[maxeig]__device__(double s){return 1./sqrt(max(s,maxeig*1e-15));});
-        dt=ev.stop(); if(rec)t.eig+=dt*1e3;
-        ev.start(); CUBLAS_CHECK(cublasDdgmm(blas,CUBLAS_SIDE_RIGHT,n,n,pSkG,n,pInv,1,pPre,n)); dt=ev.stop(); if(rec)t.scale+=dt*1e3;
-        ev.start(); CUBLAS_CHECK(cublasDgemm(blas,CUBLAS_OP_N,CUBLAS_OP_N,m,n,n,&one,pA,m,pPre,n,&zero,pA1,m)); dt=ev.stop(); if(rec)t.pre_gemm+=dt*1e3;
-        ev.start();
+        dt=ev.stop(stream); if(rec)t.eig+=dt*1e3;
+        ev.start(stream); CUBLAS_CHECK(cublasDdgmm(blas,CUBLAS_SIDE_RIGHT,n,n,pSkG,n,pInv,1,pPre,n)); dt=ev.stop(stream); if(rec)t.scale+=dt*1e3;
+        ev.start(stream); CUBLAS_CHECK(cublasDgemm(blas,CUBLAS_OP_N,CUBLAS_OP_N,m,n,n,&one,pA,m,pPre,n,&zero,pA1,m)); dt=ev.stop(stream); if(rec)t.pre_gemm+=dt*1e3;
+        ev.start(stream);
         CUBLAS_CHECK(cublasDgemm(blas,CUBLAS_OP_T,CUBLAS_OP_N,n,n,m,&one,pA1,m,pA1,m,&zero,pG,n));
-        dt=ev.stop(); if(rec)t.svqb_gram+=dt*1e3;
-        ev.start(); thrust::for_each(thrust::counting_iterator<int>(0),thrust::counting_iterator<int>(n),[pG,pDinv,n]__device__(int i){double v=pG[i+n*i];pDinv[i]=(v>0.)?1./sqrt(v):1.;});
+        dt=ev.stop(stream); if(rec)t.svqb_gram+=dt*1e3;
+        ev.start(stream); thrust::for_each(thrust::counting_iterator<int>(0),thrust::counting_iterator<int>(n),[pG,pDinv,n]__device__(int i){double v=pG[i+n*i];pDinv[i]=(v>0.)?1./sqrt(v):1.;});
         CUBLAS_CHECK(cublasDdgmm(blas,CUBLAS_SIDE_LEFT,n,n,pG,n,pDinv,1,pG,n)); CUBLAS_CHECK(cublasDdgmm(blas,CUBLAS_SIDE_RIGHT,n,n,pG,n,pDinv,1,pG,n));
-        dt=ev.stop(); if(rec)t.svqb_norm+=dt*1e3;
-        ev.start(); CUSOLVER_CHECK(cusolverDnDsyevd(solver,CUSOLVER_EIG_MODE_VECTOR,CUBLAS_FILL_MODE_LOWER,n,pG,n,pEig,d_wsv,lwsv,d_isv));
+        dt=ev.stop(stream); if(rec)t.svqb_norm+=dt*1e3;
+        ev.start(stream); CUSOLVER_CHECK(cusolverDnDsyevd(solver,CUSOLVER_EIG_MODE_VECTOR,CUBLAS_FILL_MODE_LOWER,n,pG,n,pEig,d_wsv,lwsv,d_isv));
         CUDA_CHECK(cudaMemcpy(&maxeig,pEig+n-1,sizeof(double),cudaMemcpyDeviceToHost)); thrust::transform(thrust::device_pointer_cast(pEig),thrust::device_pointer_cast(pEig)+n,thrust::device_pointer_cast(pRsqrt),[maxeig]__device__(double s){return 1./sqrt(max(s,maxeig*1e-15));});
-        dt=ev.stop(); if(rec)t.svqb_eig+=dt*1e3;
-        ev.start(); CUBLAS_CHECK(cublasDdgmm(blas,CUBLAS_SIDE_RIGHT,n,n,pG,n,pRsqrt,1,pM,n)); CUBLAS_CHECK(cublasDdgmm(blas,CUBLAS_SIDE_LEFT,n,n,pM,n,pDinv,1,pM,n)); CUBLAS_CHECK(cublasDgemm(blas,CUBLAS_OP_N,CUBLAS_OP_N,m,n,n,&one,pA1,m,pM,n,&zero,pB,m)); dt=ev.stop(); if(rec)t.svqb_apply+=dt*1e3;
+        dt=ev.stop(stream); if(rec)t.svqb_eig+=dt*1e3;
+        ev.start(stream); CUBLAS_CHECK(cublasDdgmm(blas,CUBLAS_SIDE_RIGHT,n,n,pG,n,pRsqrt,1,pM,n)); CUBLAS_CHECK(cublasDdgmm(blas,CUBLAS_SIDE_LEFT,n,n,pM,n,pDinv,1,pM,n)); CUBLAS_CHECK(cublasDgemm(blas,CUBLAS_OP_N,CUBLAS_OP_N,m,n,n,&one,pA1,m,pM,n,&zero,pB,m)); dt=ev.stop(stream); if(rec)t.svqb_apply+=dt*1e3;
     };
-    one_trial(false); CUDA_CHECK(cudaDeviceSynchronize()); wall.start(); for(int i=0;i<trials;++i)one_trial(true); t.total=wall.stop()*1e3/trials;
+    one_trial(false); CUDA_CHECK(cudaDeviceSynchronize()); wall.start(stream); for(int i=0;i<trials;++i)one_trial(true); t.total=wall.stop(stream)*1e3/trials;
     auto avg=[&](double& x){x/=trials;}; avg(t.diag);avg(t.fft);avg(t.select);avg(t.gram);avg(t.eig);avg(t.scale);avg(t.pre_gemm);avg(t.svqb_gram);avg(t.svqb_norm);avg(t.svqb_eig);avg(t.svqb_apply);
     cufftDestroy(fp); cudaFree(d_work);cudaFree(d_info);cudaFree(d_wsv);cudaFree(d_isv); return t;
 }
@@ -757,6 +1013,11 @@ static CQR2Times profile_cholqr2(cublasHandle_t blas, cusolverDnHandle_t solver,
     CUSOLVER_CHECK(cusolverDnDpotrf_bufferSize(solver,uplo,n,pG,n,&lw));
     CUDA_CHECK(cudaMalloc(&d_work,lw*sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_info,sizeof(int)));
+    cudaStream_t stream;
+CUDA_CHECK(cudaStreamCreate(&stream));
+
+CUBLAS_CHECK(cublasSetStream(blas, stream));
+CUSOLVER_CHECK(cusolverDnSetStream(solver, stream));
 
     CQR2Times t={}; EV ev, wall;
 
@@ -764,38 +1025,38 @@ static CQR2Times profile_cholqr2(cublasHandle_t blas, cusolverDnHandle_t solver,
         thrust::copy(d_Abak.begin(),d_Abak.begin()+(long long)m*n,d_A.begin());
         pA=thrust::raw_pointer_cast(d_A.data()); double dt;
 
-        ev.start();
+        ev.start(stream);
         CUBLAS_CHECK(cublasDgemm(blas,CUBLAS_OP_T,CUBLAS_OP_N,n,n,m,
                                  &a,pA,m,pA,m,&b,pG,n));
-        dt=ev.stop(); if(rec) t.gemm1+=dt*1e3;
+        dt=ev.stop(stream); if(rec) t.gemm1+=dt*1e3;
 
-        ev.start();
+        ev.start(stream);
         CUSOLVER_CHECK(cusolverDnDpotrf(solver,uplo,n,pG,n,d_work,lw,d_info));
-        dt=ev.stop(); if(rec) t.chol1+=dt*1e3;
+        dt=ev.stop(stream); if(rec) t.chol1+=dt*1e3;
 
-        ev.start();
+        ev.start(stream);
         CUBLAS_CHECK(cublasDtrsm(blas,CUBLAS_SIDE_RIGHT,uplo,CUBLAS_OP_N,
                                  CUBLAS_DIAG_NON_UNIT,m,n,&a,pG,n,pA,m));
-        dt=ev.stop(); if(rec) t.trsm1+=dt*1e3;
+        dt=ev.stop(stream); if(rec) t.trsm1+=dt*1e3;
 
-        ev.start();
+        ev.start(stream);
         CUBLAS_CHECK(cublasDgemm(blas,CUBLAS_OP_T,CUBLAS_OP_N,n,n,m,
                                  &a,pA,m,pA,m,&b,pG1,n));
-        dt=ev.stop(); if(rec) t.gemm2+=dt*1e3;
+        dt=ev.stop(stream); if(rec) t.gemm2+=dt*1e3;
 
-        ev.start();
+        ev.start(stream);
         CUSOLVER_CHECK(cusolverDnDpotrf(solver,uplo,n,pG1,n,d_work,lw,d_info));
-        dt=ev.stop(); if(rec) t.chol2+=dt*1e3;
+        dt=ev.stop(stream); if(rec) t.chol2+=dt*1e3;
 
-        ev.start();
+        ev.start(stream);
         CUBLAS_CHECK(cublasDtrsm(blas,CUBLAS_SIDE_RIGHT,uplo,CUBLAS_OP_N,
                                  CUBLAS_DIAG_NON_UNIT,m,n,&a,pG1,n,pA,m));
-        dt=ev.stop(); if(rec) t.trsm2+=dt*1e3;
+        dt=ev.stop(stream); if(rec) t.trsm2+=dt*1e3;
     };
 
     one(false); CUDA_CHECK(cudaDeviceSynchronize());
-    wall.start(); for(int i=0;i<trials;++i) one(true);
-    t.total=wall.stop()*1e3/trials;
+    wall.start(stream); for(int i=0;i<trials;++i) one(true);
+    t.total=wall.stop(stream)*1e3/trials;
 
     auto avg=[&](double& x){x/=trials;};
     avg(t.gemm1);avg(t.chol1);avg(t.trsm1);
@@ -826,7 +1087,7 @@ static void print_cqr2(const CQR2Times& t)
 }
 static void print_mrsqr(const char* name, const MRSQRTimes& t, bool show_svqb_stages)
 {
-    printf("%-16s %7.3f %7.3f %7.3f %7.3f | %7.3f %7.3f |",
+    printf("%-20s %7.3f %7.3f %7.3f %7.3f | %7.3f %7.3f |",
            name, t.diag, t.fft, t.select, t.svd, t.pre_gemm, t.pre_scale);
     if (show_svqb_stages) {
          printf(" %7.3f %7.3f %7.3f %7.3f | %7.3f\n",
@@ -838,11 +1099,11 @@ static void print_mrsqr(const char* name, const MRSQRTimes& t, bool show_svqb_st
 }
 static void print_mrsqr_header()
 {
-    printf("%-16s %7s %7s %7s %7s | %7s %7s | %7s %7s %7s %7s | %7s\n",
+    printf("%-20s %7s %7s %7s %7s | %7s %7s | %7s %7s %7s %7s | %7s\n",
            "Method", "DiagMlt", "FFT", "Select", "SVD",
            "PreGEMM", "PreScale", "Stage1", "Stage2", "Stage3", "Stage4", "Total");
-    //printf("  Stage1-3 = CholQR GEMM/Chol/TRSM for mrsqr; Stage1-4 = SVQB Gram/Norm/Eig/Apply for mrsqr2\n");
-    printf("%s\n", std::string(126,'-').c_str());
+    printf("  FP32 PreScale includes formation of V*Sigma^-1 and promotion to FP64.\n");
+    printf("%s\n", std::string(130,'-').c_str());
 }
 static void print_mreig(const MREigTimes& t)
 {
@@ -868,17 +1129,16 @@ static void print_header()
 // ===========================================================================
 int main()
 {
-    const int m = 1 << 15;
+    const int m = 1 << 20;
     const int TRIALS = 10;
-    // n = 2^4 to 2^11. Peak device memory at n=2048, m=2^20 (FP64): ~65 GB — H100 only.
-    const std::vector<int> n_sizes = {16, 32, 64, 128, 256, 512};//, 1024, 2048};
+    const std::vector<int> n_sizes = {50, 100, 200, 500};
 
     cublasHandle_t    blas;   CUBLAS_CHECK(cublasCreate(&blas));
     cusolverDnHandle_t solver; CUSOLVER_CHECK(cusolverDnCreate(&solver));
 
     printf("\n");
     printf("================================================================\n");
-    printf("  MRCQR vs CholQR2 Sub-Operation Profile\n");
+    printf("  MRCQR / MRSQR2 vs CholQR2 Sub-Operation Profile\n");
     printf("  m = %d (2^20),  %d trials.  All times in ms.\n", m, TRIALS);
     printf("  CholQR2 columns: Pass1(GEMM|Chol|TRSM) | Pass2(GEMM|Chol|TRSM)\n");
     printf("================================================================\n");
@@ -902,6 +1162,9 @@ int main()
         MRSQRTimes profile_mrsqr2_result = profile_mrsqr(blas, solver, d_A, d_Abak, m, n, TRIALS, true, ProfileSvd::Gesvd);
         MRSQRTimes profile_mrsqr2_gesvdj = profile_mrsqr(blas, solver, d_A, d_Abak, m, n, TRIALS, true, ProfileSvd::Gesvdj);
         MRSQRTimes profile_mrsqr2_gesvdp = profile_mrsqr(blas, solver, d_A, d_Abak, m, n, TRIALS, true, ProfileSvd::Gesvdp);
+        MRSQRTimes profile_mrsqr2_fp32 = profile_mrsqr_fp32(blas, solver, d_A, d_Abak, m, n, TRIALS, ProfileSvd::Gesvd);
+        MRSQRTimes profile_mrsqr2_gesvdj_fp32 = profile_mrsqr_fp32(blas, solver, d_A, d_Abak, m, n, TRIALS, ProfileSvd::Gesvdj);
+        MRSQRTimes profile_mrsqr2_gesvdp_fp32 = profile_mrsqr_fp32(blas, solver, d_A, d_Abak, m, n, TRIALS, ProfileSvd::Gesvdp);
         MREigTimes profile_mreig_svqb_result = profile_mreig_svqb(blas, solver, d_A, d_Abak, m, n, TRIALS);
 
         print_mrcqr("MRCQR (FP64)", profile_mrcqr_fp64);
@@ -915,7 +1178,10 @@ int main()
         print_mrsqr("mrsqr2", profile_mrsqr2_result, true);
         print_mrsqr("mrsqr2_gesvdj", profile_mrsqr2_gesvdj, true);
         print_mrsqr("mrsqr2_gesvdp", profile_mrsqr2_gesvdp, true);
-        print_mreig(profile_mreig_svqb_result);
+        print_mrsqr("mrsqr2_fp32", profile_mrsqr2_fp32, true);
+        print_mrsqr("mrsqr2_gesvdj_fp32", profile_mrsqr2_gesvdj_fp32, true);
+        print_mrsqr("mrsqr2_gesvdp_fp32", profile_mrsqr2_gesvdp_fp32, true);
+       // print_mreig(profile_mreig_svqb_result);
 
         // // Sketch overhead as % of MRCQR FP64 total
         // printf("\n  Sketch overhead (FP64): %.1f%% of total\n",

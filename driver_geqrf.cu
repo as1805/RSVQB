@@ -58,11 +58,16 @@ static double time_geqrf(cusolverDnHandle_t solver,
 
     // Warmup (NOT timed)
     one(); CUDA_CHECK(cudaDeviceSynchronize());
+cudaStream_t stream;
+CUDA_CHECK(cudaStreamCreate(&stream));
+
+
+CUSOLVER_CHECK(cusolverDnSetStream(solver, stream));
 
     // Timed trials
-    EV wall; wall.start();
+    EV wall; wall.start(stream);
     for (int t = 0; t < trials; ++t) one();
-    double time_s = wall.stop() / trials;
+    double time_s = wall.stop(stream) / trials;
 
     cudaFree(d_tau); cudaFree(d_work); cudaFree(d_info);
     return time_s;

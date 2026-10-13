@@ -1,9 +1,9 @@
 // driver_accuracy.cu
-// Accuracy vs. condition number: MRCQR (FP64/FP32/FP16) and CholQR2.
+// Accuracy across singular-value distributions: MRCQR, MRSQR2, and references.
 // No Eigen — all checks are GPU-side via cuBLAS/cuSOLVER.
 //
 // Fixed: m = 2^20, n = 50, sketch size c = 3n
-// Sweep: kappa = 10^2, ..., 10^15
+// Sweep: kappa = 10^1, ..., 10^16 for each spectrum family.
 
 #include "mrcqr.hpp"
 #include "cholqr2.hpp"
@@ -18,6 +18,7 @@
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/random.h>
 
+#include <cassert>
 #include <cmath>
 #include <cstdio>
 #include <vector>
@@ -62,13 +63,14 @@ static void gpu_ortho(cusolverDnHandle_t solver, double* d_X, int m, int n)
 }
 
 // ---------------------------------------------------------------------------
-// Generate A = U * diag(sigma) * V^T  on GPU, download to h_A.
-// U (m×n) and V (n×n) are random orthonormal; sigma_i = kappa^(0.5 - i/(n-1)).
+// Generate A = U * diag(sigma) * V^T on GPU, then download to h_A.
 // ---------------------------------------------------------------------------
-static void makeIllConditioned(cublasHandle_t blas, cusolverDnHandle_t solver,
-                                int m, int n, double kappa,
-                                std::vector<double>& h_A)
+static void makeSVDTestMatrix(cublasHandle_t blas, cusolverDnHandle_t solver,
+                              int m, int n, const std::vector<double>& h_sigma,
+                              std::vector<double>& h_A)
 {
+    assert((int)h_sigma.size() == n);
+    assert(m >= n);
     thrust::device_vector<double> d_U(m * n), d_V(n * n);
 
     thrust::transform(thrust::counting_iterator<unsigned>(0),
@@ -81,10 +83,7 @@ static void makeIllConditioned(cublasHandle_t blas, cusolverDnHandle_t solver,
     gpu_ortho(solver, thrust::raw_pointer_cast(d_U.data()), m, n);
     gpu_ortho(solver, thrust::raw_pointer_cast(d_V.data()), n, n);
 
-    // Scale columns of U: U[:,i] *= sigma_i  (cublasDdgmm, SIDE_RIGHT)
-    std::vector<double> h_sigma(n);
-    for (int i = 0; i < n; i++)
-        h_sigma[i] = std::pow(kappa, 0.5 - (double)i / (n - 1));
+    // Scale columns of U: U[:,i] *= sigma_i.
     thrust::device_vector<double> d_sigma(h_sigma);
 
     CUBLAS_CHECK(cublasDdgmm(blas, CUBLAS_SIDE_RIGHT, m, n,
@@ -92,7 +91,7 @@ static void makeIllConditioned(cublasHandle_t blas, cusolverDnHandle_t solver,
                              thrust::raw_pointer_cast(d_sigma.data()), 1,
                              thrust::raw_pointer_cast(d_U.data()), m));
 
-    // A = U * V^T
+    // Form A = U * Sigma * V^T.
     thrust::device_vector<double> d_A(m * n);
     const double a = 1., b = 0.;
     CUBLAS_CHECK(cublasDgemm(blas, CUBLAS_OP_N, CUBLAS_OP_T, m, n, n,
@@ -104,6 +103,30 @@ static void makeIllConditioned(cublasHandle_t blas, cusolverDnHandle_t solver,
 
     h_A.resize(m * n);
     thrust::copy(d_A.begin(), d_A.end(), h_A.begin());
+}
+
+static std::vector<double> geometricSigma(int n, double kappa)
+{
+    std::vector<double> sigma(n);
+    for (int i = 0; i < n; ++i)
+        sigma[i] = std::pow(10.0, -std::log10(kappa) * i / (n - 1));
+    return sigma;
+}
+
+static std::vector<double> linearSigma(int n, double kappa)
+{
+    std::vector<double> sigma(n);
+    for (int i = 0; i < n; ++i)
+        sigma[i] = 1.0 - (1.0 - 1.0 / kappa) * (double)i / (n - 1);
+    return sigma;
+}
+
+static std::vector<double> clusteredSigma(int n, double kappa)
+{
+    std::vector<double> sigma(n);
+    for (int i = 0; i < n; ++i)
+        sigma[i] = (i < n / 2) ? 1.0 : 1.0 / kappa;
+    return sigma;
 }
 
 // ---------------------------------------------------------------------------
@@ -251,21 +274,34 @@ int main()
     const int n = 50;
     const int c = 3 * n;
 
-    std::vector<double> kappas;
-    for (int k = 2; k <= 16; k++) kappas.push_back(std::pow(10.0, k));
-    int NK = (int)kappas.size();
+    struct SpectrumCase {
+        const char* name;
+    };
+    const std::vector<SpectrumCase> spectra = {
+        {"geometric"},
+        {"linear"},
+        {"clustered"}
+    };
+    const int KAPPA_COUNT = 16;
+    const int NK = (int)spectra.size() * KAPPA_COUNT;
 
     const double NV = std::numeric_limits<double>::quiet_NaN();
     std::vector<double> dev_f64(NK,NV), dev_f32(NK,NV), dev_f16(NK,NV),
                         dev_cholqr2(NK,NV), dev_geqrf(NK,NV), dev_svqb2(NK,NV),
                         dev_mrsqr(NK,NV), dev_mrsqr2(NK,NV),
                         dev_mreig_svqb(NK,NV), dev_mrsqr2_gesvdj(NK,NV),
-                        dev_mrsqr2_gesvdp(NK,NV);
+                        dev_mrsqr2_gesvdp(NK,NV),
+                        dev_mrsqr2_fp32(NK,NV), dev_mrsqr2_gesvdj_fp32(NK,NV),
+                        dev_mrsqr2_gesvdp_fp32(NK,NV);
     std::vector<double> res_f64(NK,NV), res_f32(NK,NV), res_f16(NK,NV),
                         res_cholqr2(NK,NV), res_geqrf(NK,NV), res_svqb2(NK,NV),
                         res_mrsqr(NK,NV), res_mrsqr2(NK,NV),
                         res_mreig_svqb(NK,NV), res_mrsqr2_gesvdj(NK,NV),
-                        res_mrsqr2_gesvdp(NK,NV);
+                        res_mrsqr2_gesvdp(NK,NV),
+                        res_mrsqr2_fp32(NK,NV), res_mrsqr2_gesvdj_fp32(NK,NV),
+                        res_mrsqr2_gesvdp_fp32(NK,NV);
+    std::vector<double> h_err_mrsqr2_gesvdp(NK,NV);
+    std::vector<double> h_err_mrsqr2_gesvdp_fp32(NK,NV);
 
     std::vector<double> h_Q((long long)m * n), h_R((long long)n * n);
     double time_s;
@@ -273,14 +309,28 @@ int main()
     cublasHandle_t    blas;   CUBLAS_CHECK(cublasCreate(&blas));
     cusolverDnHandle_t solver; CUSOLVER_CHECK(cusolverDnCreate(&solver));
 
-    printf("=== Accuracy vs Condition Number: m=%d, n=%d, c=%d ===\n\n", m, n, c);
+    printf("=== Accuracy across singular-value distributions: m=%d, n=%d, c=%d ===\n",
+           m, n, c);
+    printf("Sweeping kappa = 10^1, ..., 10^16 for geometric, linear, and clustered spectra.\n\n");
 
-    for (int i = 0; i < NK; i++) {
-        double kappa = kappas[i];
-        printf("kappa = 1e%d ... ", i + 2); fflush(stdout);
+    for (int spectrum_index = 0; spectrum_index < (int)spectra.size(); ++spectrum_index) {
+      for (int kappa_index = 0; kappa_index < KAPPA_COUNT; ++kappa_index) {
+        const int i = spectrum_index * KAPPA_COUNT + kappa_index;
+        const double kappa = std::pow(10.0, kappa_index + 1);
+        std::vector<double> sigma;
+        if (spectrum_index == 0)
+            sigma = geometricSigma(n, kappa);
+        else if (spectrum_index == 1)
+            sigma = linearSigma(n, kappa);
+        else
+            sigma = clusteredSigma(n, kappa);
+
+        printf("spectrum = %s, kappa = 1e%d ... ",
+               spectra[spectrum_index].name, kappa_index + 1);
+        fflush(stdout);
 
         std::vector<double> h_A;
-        makeIllConditioned(blas, solver, m, n, kappa, h_A);
+        makeSVDTestMatrix(blas, solver, m, n, sigma, h_A);
 
         auto measure = [&](double& dev, double& res) {
             dev = ortho_check(blas, solver, h_Q.data(), m, n);
@@ -313,8 +363,19 @@ int main()
         mrsqr2_gesvdj_fp64(h_A.data(), m, n, c, h_Q.data(), h_R.data(), time_s);
         measure(dev_mrsqr2_gesvdj[i], res_mrsqr2_gesvdj[i]);
 
-        mrsqr2_gesvdp_fp64(h_A.data(), m, n, c, h_Q.data(), h_R.data(), time_s);
+        mrsqr2_gesvdp_fp64(h_A.data(), m, n, c, h_Q.data(), h_R.data(), time_s,
+                   1, true, &h_err_mrsqr2_gesvdp[i]);
         measure(dev_mrsqr2_gesvdp[i], res_mrsqr2_gesvdp[i]);
+
+        mrsqr2_fp32(h_A.data(), m, n, c, h_Q.data(), h_R.data(), time_s);
+        measure(dev_mrsqr2_fp32[i], res_mrsqr2_fp32[i]);
+
+        mrsqr2_gesvdj_fp32(h_A.data(), m, n, c, h_Q.data(), h_R.data(), time_s);
+        measure(dev_mrsqr2_gesvdj_fp32[i], res_mrsqr2_gesvdj_fp32[i]);
+
+        mrsqr2_gesvdp_fp32(h_A.data(), m, n, c, h_Q.data(), h_R.data(), time_s,
+                           1, true, &h_err_mrsqr2_gesvdp_fp32[i]);
+        measure(dev_mrsqr2_gesvdp_fp32[i], res_mrsqr2_gesvdp_fp32[i]);
 
         mreig2_svqb(h_A.data(), m, n, c, h_Q.data(), h_R.data(), time_s);
         measure(dev_mreig_svqb[i], res_mreig_svqb[i]);
@@ -322,51 +383,65 @@ int main()
         run_geqrf(solver, blas, h_A.data(), m, n, h_Q.data(), h_R.data());
         measure(dev_geqrf[i], res_geqrf[i]);
 
-        printf("done\n"); fflush(stdout);
+      fflush(stdout);
+      }
     }
 
     cublasDestroy(blas); cusolverDnDestroy(solver);
 
     // MATLAB output
-    auto print_arr = [&](const char* name, const std::vector<double>& v) {
-        printf("%s = [", name);
-        for (int i = 0; i < (int)v.size(); i++) {
-            if (i) printf(", ");
-            std::isnan(v[i]) ? printf("NaN") : printf("%.6e", v[i]);
+    auto print_matrix = [&](const char* name, const std::vector<double>& v) {
+        printf("%s = [\n", name);
+        for (int row = 0; row < (int)spectra.size(); ++row) {
+            printf("  ");
+            for (int col = 0; col < KAPPA_COUNT; ++col) {
+                if (col) printf(", ");
+                const double value = v[row * KAPPA_COUNT + col];
+                std::isnan(value) ? printf("NaN") : printf("%.6e", value);
+            }
+            printf(";\n");
         }
         printf("];\n");
     };
 
     printf("\n%% === MATLAB DATA (m=%d, n=%d) ===\n", m, n);
-    printf("cond_A = [");
-    for (int i = 0; i < NK; i++) { if (i) printf(", "); printf("1e%d", i + 2); }
-    printf("];\n\n");
+    printf("spectrum_types = {'geometric', 'linear', 'clustered'};\n");
+    printf("cond_A = 10.^(1:16);\n");
+    printf("%% Result matrices have one row per spectrum_types entry and one column per cond_A.\n");
 
     printf("%% Deviation from orthonormality ||Q^T Q - I||_2\n");
-    print_arr("dev_fp64",    dev_f64);
-    print_arr("dev_fp32",    dev_f32);
-    print_arr("dev_fp16",    dev_f16);
-    print_arr("dev_cholqr2", dev_cholqr2);
-    print_arr("dev_svqb",        dev_svqb2);
-    print_arr("dev_mrsqr",   dev_mrsqr);
-    print_arr("dev_mrsqr2",  dev_mrsqr2);
-    print_arr("dev_mrsqr2_gesvdj", dev_mrsqr2_gesvdj);
-    print_arr("dev_mrsqr2_gesvdp", dev_mrsqr2_gesvdp);
-    print_arr("dev_mreig2_svqb", dev_mreig_svqb);
-    print_arr("dev_geqrf",        dev_geqrf);
+    print_matrix("dev_fp64",    dev_f64);
+    print_matrix("dev_fp32",    dev_f32);
+    print_matrix("dev_fp16",    dev_f16);
+    print_matrix("dev_cholqr2", dev_cholqr2);
+    print_matrix("dev_svqb",    dev_svqb2);
+    print_matrix("dev_mrsqr",   dev_mrsqr);
+    print_matrix("dev_mrsqr2",  dev_mrsqr2);
+    print_matrix("dev_mrsqr2_gesvdj", dev_mrsqr2_gesvdj);
+    print_matrix("dev_mrsqr2_gesvdp", dev_mrsqr2_gesvdp);
+    print_matrix("dev_mrsqr2_fp32", dev_mrsqr2_fp32);
+    print_matrix("dev_mrsqr2_gesvdj_fp32", dev_mrsqr2_gesvdj_fp32);
+    print_matrix("dev_mrsqr2_gesvdp_fp32", dev_mrsqr2_gesvdp_fp32);
+    print_matrix("h_err_mrsqr2_gesvdp", h_err_mrsqr2_gesvdp);
+    print_matrix("h_err_mrsqr2_gesvdp_fp32", h_err_mrsqr2_gesvdp_fp32);
+    print_matrix("dev_mreig2_svqb", dev_mreig_svqb);
+    print_matrix("dev_geqrf",     dev_geqrf);
 
     printf("\n%% Relative residual ||A - QR||_F / ||A||_F\n");
-    print_arr("res_fp64",    res_f64);
-    print_arr("res_fp32",    res_f32);
-    print_arr("res_fp16",    res_f16);
-    print_arr("res_cholqr2", res_cholqr2);
-    print_arr("res_svqb2",        res_svqb2);
-    print_arr("res_mrsqr",   res_mrsqr);
-    print_arr("res_mrsqr2",  res_mrsqr2);
-    print_arr("res_mrsqr2_gesvdj", res_mrsqr2_gesvdj);
-    print_arr("res_mrsqr2_gesvdp", res_mrsqr2_gesvdp);
-    print_arr("res_mreig_svqb", res_mreig_svqb);
-    print_arr("res_geqrf",        res_geqrf);
+    print_matrix("res_fp64",    res_f64);
+    print_matrix("res_fp32",    res_f32);
+    print_matrix("res_fp16",    res_f16);
+    print_matrix("res_cholqr2", res_cholqr2);
+    print_matrix("res_svqb2",   res_svqb2);
+    print_matrix("res_mrsqr",   res_mrsqr);
+    print_matrix("res_mrsqr2",  res_mrsqr2);
+    print_matrix("res_mrsqr2_gesvdj", res_mrsqr2_gesvdj);
+    print_matrix("res_mrsqr2_gesvdp", res_mrsqr2_gesvdp);
+    print_matrix("res_mrsqr2_fp32", res_mrsqr2_fp32);
+    print_matrix("res_mrsqr2_gesvdj_fp32", res_mrsqr2_gesvdj_fp32);
+    print_matrix("res_mrsqr2_gesvdp_fp32", res_mrsqr2_gesvdp_fp32);
+    print_matrix("res_mreig_svqb", res_mreig_svqb);
+    print_matrix("res_geqrf",     res_geqrf);
 
     return 0;
 }

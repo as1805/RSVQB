@@ -29,7 +29,7 @@ endif
     MATH_LIBDIR := $(TACC_NVIDIA_MATH_DIR)/lib64
     MATH_INCDIR := $(TACC_NVIDIA_MATH_DIR)/include
 
-else ifeq ($(HOSTNAME),gpu19)
+else ifeq ($(HOSTNAME),gpu18)
 
     CUDA_PATH   := /usr/local/apps/cuda/cuda-12.0
     CUDA_LIBDIR := $(CUDA_PATH)/lib64

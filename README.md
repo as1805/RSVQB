@@ -7,6 +7,10 @@ This directory contains CUDA implementations and benchmarks for randomized and C
 - `mrcqr_fp64`, `mrcqr_fp32`, `mrcqr_fp16`
   - Mixed-precision randomized Cholesky QR variants
   - Uses a randomized sketch plus a final FP64 Cholesky QR refinement
+- `mrsqr2_fp32`, `mrsqr2_gesvdj_fp32`, `mrsqr2_gesvdp_fp32`
+  - Form the randomized sketch and SVD preconditioner in FP32
+  - Promote the preconditioner to FP64 before applying it to the input matrix;
+    the SVQB postprocess is also FP64
 - `cholqr2`
   - Optimized CholeskyQR2 implementation
 - `svqb2`

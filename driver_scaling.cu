@@ -161,9 +161,15 @@ static double time_fp64(cublasHandle_t blas,cusolverDnHandle_t solver,
     };
     thrust::copy(d_Abak.begin(),d_Abak.begin()+(long long)m*n,d_A.begin());
     one(); CUDA_CHECK(cudaDeviceSynchronize());
-    EV wall; wall.start();
+    cudaStream_t stream;
+CUDA_CHECK(cudaStreamCreate(&stream));
+
+CUBLAS_CHECK(cublasSetStream(blas, stream));
+CUSOLVER_CHECK(cusolverDnSetStream(solver, stream));
+CUFFT_CHECK(cufftSetStream(fp, stream));
+    EV wall; wall.start(stream);
     for(int t=0;t<trials;++t){thrust::copy(d_Abak.begin(),d_Abak.begin()+(long long)m*n,d_A.begin());one();}
-    double ms=wall.stop()*1e3/trials;
+    double ms=wall.stop(stream)*1e3/trials;
     cufftDestroy(fp);cudaFree(d_tau);cudaFree(d_wsk);cudaFree(d_isk);cudaFree(d_wch);cudaFree(d_ich);
     return ms;
 }
@@ -226,10 +232,16 @@ static double time_fp32(cublasHandle_t blas,cusolverDnHandle_t solver,
         cholqr(blas,solver,pA,pG,d_wch,lw_ch,d_ich,m,n);
     };
     thrust::copy(d_Abak.begin(),d_Abak.begin()+(long long)m*n,d_A.begin());
+    cudaStream_t stream;
+CUDA_CHECK(cudaStreamCreate(&stream));
+
+CUBLAS_CHECK(cublasSetStream(blas, stream));
+CUSOLVER_CHECK(cusolverDnSetStream(solver, stream));
+CUFFT_CHECK(cufftSetStream(fp, stream));
     one(); CUDA_CHECK(cudaDeviceSynchronize());
-    EV wall; wall.start();
+    EV wall; wall.start(stream);
     for(int t=0;t<trials;++t){thrust::copy(d_Abak.begin(),d_Abak.begin()+(long long)m*n,d_A.begin());one();}
-    double ms=wall.stop()*1e3/trials;
+    double ms=wall.stop(stream)*1e3/trials;
     cufftDestroy(fp);cudaFree(d_tau);cudaFree(d_wsk);cudaFree(d_isk);cudaFree(d_wch);cudaFree(d_ich);
     return ms;
 }
@@ -295,9 +307,15 @@ static double time_fp16(cublasHandle_t blas,cusolverDnHandle_t solver,
     };
     thrust::copy(d_Abak.begin(),d_Abak.begin()+(long long)m*n,d_A.begin());
     one(); CUDA_CHECK(cudaDeviceSynchronize());
-    EV wall; wall.start();
+    cudaStream_t stream;
+CUDA_CHECK(cudaStreamCreate(&stream));
+
+CUBLAS_CHECK(cublasSetStream(blas, stream));
+CUSOLVER_CHECK(cusolverDnSetStream(solver, stream));
+CUFFT_CHECK(cufftSetStream(fp, stream));
+    EV wall; wall.start(stream);
     for(int t=0;t<trials;++t){thrust::copy(d_Abak.begin(),d_Abak.begin()+(long long)m*n,d_A.begin());one();}
-    double ms=wall.stop()*1e3/trials;
+    double ms=wall.stop(stream)*1e3/trials;
     cufftDestroy(fp);cudaFree(d_tau);cudaFree(d_wsk);cudaFree(d_isk);cudaFree(d_wch);cudaFree(d_ich);
     return ms;
 }
@@ -330,9 +348,15 @@ static double time_cholqr2(cublasHandle_t blas,cusolverDnHandle_t solver,
     };
     thrust::copy(d_Abak.begin(),d_Abak.begin()+(long long)m*n,d_A.begin());
     one(); CUDA_CHECK(cudaDeviceSynchronize());
-    EV wall; wall.start();
+    cudaStream_t stream;
+CUDA_CHECK(cudaStreamCreate(&stream));
+
+CUBLAS_CHECK(cublasSetStream(blas, stream));
+CUSOLVER_CHECK(cusolverDnSetStream(solver, stream));
+
+    EV wall; wall.start(stream);
     for(int t=0;t<trials;++t){thrust::copy(d_Abak.begin(),d_Abak.begin()+(long long)m*n,d_A.begin());one();}
-    double ms=wall.stop()*1e3/trials;
+    double ms=wall.stop(stream)*1e3/trials;
     cudaFree(d_work); cudaFree(d_info);
     return ms;
 }

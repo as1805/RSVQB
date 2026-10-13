@@ -6,8 +6,8 @@
 #SBATCH --qos=short_gpu
 #SBATCH --gres=gpu:h200:1
 #SBATCH --ntasks=1
-#SBATCH --mem=40G 
-#SBATCH --time=01:00:00
+#SBATCH --time=01:30:00
+#SBATCH --mem=32G
 
 nvidia-smi
 module load cuda

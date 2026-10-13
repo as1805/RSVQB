@@ -48,7 +48,21 @@ void mrsqr2_gesvdj_fp64(const double* h_A, int m, int n, int c,
 
 void mrsqr2_gesvdp_fp64(const double* h_A, int m, int n, int c,
                         double* h_Q, double* h_R, double& time_s,
+                        int trials = 1, bool re_only = true, double* h_err = nullptr);
+
+// FP32 sketch and SVD form the preconditioner; it is promoted to FP64 before
+// applying it to A and running the FP64 SVQB postprocess.
+void mrsqr2_fp32(const double* h_A, int m, int n, int c,
+                 double* h_Q, double* h_R, double& time_s,
+                 int trials = 1, bool re_only = true);
+
+void mrsqr2_gesvdj_fp32(const double* h_A, int m, int n, int c,
+                        double* h_Q, double* h_R, double& time_s,
                         int trials = 1, bool re_only = true);
+
+void mrsqr2_gesvdp_fp32(const double* h_A, int m, int n, int c,
+                        double* h_Q, double* h_R, double& time_s,
+                        int trials = 1, bool re_only = true, double* h_err = nullptr);
 
 void mreig_svqb(const double* h_A, int m, int n, int c,
                 double* h_Q, double* h_R, double& time_s,

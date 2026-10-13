@@ -19,8 +19,10 @@
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/random.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <stdexcept>
 #include <vector>
 
 // ---------------------------------------------------------------------------
@@ -381,13 +383,20 @@ void mrcqr_fp64(const double* h_A, int m, int n, int c,
     thrust::copy(d_Abak.begin(), d_Abak.end(), d_A.begin());
     one(); CUDA_CHECK(cudaDeviceSynchronize());
 
+    cudaStream_t stream;
+CUDA_CHECK(cudaStreamCreate(&stream));
+
+CUBLAS_CHECK(cublasSetStream(blas, stream));
+CUSOLVER_CHECK(cusolverDnSetStream(solver, stream));
+CUFFT_CHECK(cufftSetStream(fp, stream));
+
     // Timed trials (host↔device copies excluded)
-    EV wall; wall.start();
+    EV wall; wall.start(stream);
     for (int t = 0; t < trials; ++t) {
         thrust::copy(d_Abak.begin(), d_Abak.end(), d_A.begin());
         one();
     }
-    time_s = wall.stop() / trials;
+    time_s = wall.stop(stream) / trials;
 
     // Compute R = R_c · R_s (NOT timed)
     compute_R(blas, pG, pRs, h_R, n);
@@ -530,11 +539,17 @@ void mreig_svqb(const double* h_A, int m, int n, int c,
 
     one_trial();
     CUDA_CHECK(cudaDeviceSynchronize());
+    cudaStream_t stream;
+CUDA_CHECK(cudaStreamCreate(&stream));
+
+CUBLAS_CHECK(cublasSetStream(blas, stream));
+CUSOLVER_CHECK(cusolverDnSetStream(solver, stream));
+CUFFT_CHECK(cufftSetStream(fp, stream));
     EV wall;
-    wall.start();
+    wall.start(stream);
     for (int trial = 0; trial < trials; ++trial)
         one_trial();
-    time_s = wall.stop() / trials;
+    time_s = wall.stop(stream) / trials;
 
     // B recovery is excluded from timing, consistent with mrsqr2.
     CUBLAS_CHECK(cublasDgemm(blas, CUBLAS_OP_T, CUBLAS_OP_N,
@@ -659,11 +674,10 @@ void mreig2_svqb(const double* h_A, int m, int n, int c,
                                  m, n, n, &one, pA, m, pPre, n,
                                  &zero, pA1, m));
 
-          printf("done\n");
+    
         svqb_pass(blas, solver, pA1, pB, m, n, pG, pEig, pDinv,
                   pRsqrt, pM, d_wev, lw_ev, d_iev);
-             printf("done\n");
-
+         
 
         // // Gs = As^T As; Gs = V Lambda V^T.
         // CUBLAS_CHECK(cublasDgemm(blas, CUBLAS_OP_T, CUBLAS_OP_N,
@@ -698,13 +712,19 @@ void mreig2_svqb(const double* h_A, int m, int n, int c,
     };
 
     one_trial();
-     printf("done1\n");
+  
     CUDA_CHECK(cudaDeviceSynchronize());
+    cudaStream_t stream;
+CUDA_CHECK(cudaStreamCreate(&stream));
+
+CUBLAS_CHECK(cublasSetStream(blas, stream));
+CUSOLVER_CHECK(cusolverDnSetStream(solver, stream));
+CUFFT_CHECK(cufftSetStream(fp, stream));
     EV wall;
-    wall.start();
+    wall.start(stream);
     for (int trial = 0; trial < trials; ++trial)
         one_trial();
-    time_s = wall.stop() / trials;
+    time_s = wall.stop(stream) / trials;
 
     // B recovery is excluded from timing, consistent with mrsqr2.
     CUBLAS_CHECK(cublasDgemm(blas, CUBLAS_OP_T, CUBLAS_OP_N,
@@ -807,13 +827,18 @@ void mrcqr_fp32(const double* h_A, int m, int n, int c,
 
     thrust::copy(d_Abak.begin(), d_Abak.end(), d_A.begin());
     one(); CUDA_CHECK(cudaDeviceSynchronize());
+    cudaStream_t stream;
+CUDA_CHECK(cudaStreamCreate(&stream));
 
-    EV wall; wall.start();
+CUBLAS_CHECK(cublasSetStream(blas, stream));
+CUSOLVER_CHECK(cusolverDnSetStream(solver, stream));
+CUFFT_CHECK(cufftSetStream(fp, stream));
+    EV wall; wall.start(stream);
     for (int t = 0; t < trials; ++t) {
         thrust::copy(d_Abak.begin(), d_Abak.end(), d_A.begin());
         one();
     }
-    time_s = wall.stop() / trials;
+    time_s = wall.stop(stream) / trials;
 
     compute_R(blas, pG, pRs, h_R, n);
     pA = thrust::raw_pointer_cast(d_A.data());
@@ -917,13 +942,18 @@ void mrcqr_fp16(const double* h_A, int m, int n, int c,
 
     thrust::copy(d_Abak.begin(), d_Abak.end(), d_A.begin());
     one(); CUDA_CHECK(cudaDeviceSynchronize());
+    cudaStream_t stream;
+CUDA_CHECK(cudaStreamCreate(&stream));
 
-    EV wall; wall.start();
+CUBLAS_CHECK(cublasSetStream(blas, stream));
+CUSOLVER_CHECK(cusolverDnSetStream(solver, stream));
+CUFFT_CHECK(cufftSetStream(fp, stream));
+    EV wall; wall.start(stream);
     for (int t = 0; t < trials; ++t) {
         thrust::copy(d_Abak.begin(), d_Abak.end(), d_A.begin());
         one();
     }
-    time_s = wall.stop() / trials;
+    time_s = wall.stop(stream) / trials;
 
     compute_R(blas, pG, pRs, h_R, n);
     pA = thrust::raw_pointer_cast(d_A.data());
@@ -1212,10 +1242,15 @@ CUDA_CHECK(cudaDeviceSynchronize());
 
     one();
     CUDA_CHECK(cudaDeviceSynchronize());
+        cudaStream_t stream;
+CUDA_CHECK(cudaStreamCreate(&stream));
 
+CUBLAS_CHECK(cublasSetStream(blas, stream));
+CUSOLVER_CHECK(cusolverDnSetStream(solver, stream));
+CUFFT_CHECK(cufftSetStream(fp, stream));
     // Timed trials (host↔device copies excluded)
     EV wall;
-    wall.start();
+    wall.start(stream);
 
     for (int t = 0; t < trials; ++t) {
 
@@ -1227,7 +1262,7 @@ CUDA_CHECK(cudaDeviceSynchronize());
         one();
     }
 
-    time_s = wall.stop() / trials;
+    time_s = wall.stop(stream) / trials;
 
 
         // Compute R = R_c · R_s (NOT timed)
@@ -1330,7 +1365,7 @@ enum class MRSQR2Svd { Gesvd, Gesvdj, Gesvdp };
 
 static void mrsqr2_fp64_impl(const double* h_A, int m, int n, int c,
                              double* h_Q, double* h_R, double& time_s,
-                             int trials, bool re_only, MRSQR2Svd svd_kind)
+                             int trials, bool re_only, MRSQR2Svd svd_kind, double& h_err)
 {
     const double a = 1., b = 0.;
     const int half_r = m/2 + 1;
@@ -1549,7 +1584,7 @@ static void mrsqr2_fp64_impl(const double* h_A, int m, int n, int c,
         }
 
         CUDA_CHECK(cudaDeviceSynchronize());
-
+        h_err=gesvdp_err_sigma;
         // --------------------------------------------------------
         // Form
         //
@@ -1613,10 +1648,15 @@ CUDA_CHECK(cudaDeviceSynchronize());
 
     one();
     CUDA_CHECK(cudaDeviceSynchronize());
+        cudaStream_t stream;
+CUDA_CHECK(cudaStreamCreate(&stream));
 
+CUBLAS_CHECK(cublasSetStream(blas, stream));
+CUSOLVER_CHECK(cusolverDnSetStream(solver, stream));
+CUFFT_CHECK(cufftSetStream(fp, stream));
     // Timed trials (host↔device copies excluded)
     EV wall;
-    wall.start();
+    wall.start(stream);
 
     for (int t = 0; t < trials; ++t) {
 
@@ -1628,7 +1668,7 @@ CUDA_CHECK(cudaDeviceSynchronize());
         one();
     }
 
-    time_s = wall.stop() / trials;
+    time_s = wall.stop(stream) / trials;
 
     // Recover B outside the timed region: B = Q^T A.
     CUBLAS_CHECK(cublasDgemm(blas, CUBLAS_OP_T, CUBLAS_OP_N, n, n, m,
@@ -1683,22 +1723,260 @@ CUDA_CHECK(cudaDeviceSynchronize());
 void mrsqr2_fp64(const double* h_A, int m, int n, int c,
                 double* h_Q, double* h_R, double& time_s, int trials, bool re_only)
 {
+    double h_err = 0.0;
     mrsqr2_fp64_impl(h_A, m, n, c, h_Q, h_R, time_s, trials, re_only,
-                     MRSQR2Svd::Gesvd);
+                     MRSQR2Svd::Gesvd, h_err);
 }
 
 void mrsqr2_gesvdj_fp64(const double* h_A, int m, int n, int c,
                         double* h_Q, double* h_R, double& time_s,
                         int trials, bool re_only)
 {
+    double h_err = 0.0;
     mrsqr2_fp64_impl(h_A, m, n, c, h_Q, h_R, time_s, trials, re_only,
-                     MRSQR2Svd::Gesvdj);
+                     MRSQR2Svd::Gesvdj, h_err);
 }
 
 void mrsqr2_gesvdp_fp64(const double* h_A, int m, int n, int c,
                         double* h_Q, double* h_R, double& time_s,
+                        int trials, bool re_only, double* h_err)
+{
+    double err = 0.0;
+    mrsqr2_fp64_impl(h_A, m, n, c, h_Q, h_R, time_s, trials, re_only,
+                     MRSQR2Svd::Gesvdp, err);
+    if (h_err) *h_err = err;
+}
+
+static void mrsqr2_fp32_impl(const double* h_A, int m, int n, int c,
+                             double* h_Q, double* h_R, double& time_s,
+                             int trials, bool re_only, MRSQR2Svd svd_kind,
+                             double& h_err)
+{
+    const double one = 1., zero = 0.;
+    const int half_r = m/2 + 1;
+    const int sketch_rows = re_only ? c : 2*c;
+    const float norm = (float)std::sqrt((double)c / m);
+    const int blk = 256;
+    const int grd = (int)std::min(65535LL, ((long long)m*n + blk - 1) / blk);
+
+    cublasHandle_t blas;
+    CUBLAS_CHECK(cublasCreate(&blas));
+    cusolverDnHandle_t solver;
+    CUSOLVER_CHECK(cusolverDnCreate(&solver));
+
+    thrust::device_vector<double> d_A(h_A, h_A + (long long)m*n);
+    thrust::device_vector<double> d_Abak(d_A);
+    thrust::device_vector<int8_t> d_D(m);
+    thrust::device_vector<int> d_S(c);
+    thrust::device_vector<float> d_FA((long long)m*n);
+    thrust::device_vector<cufftComplex> d_fft((long long)n*half_r);
+    thrust::device_vector<float> d_sk((long long)sketch_rows*n);
+    thrust::device_vector<float> d_VT_f32((long long)n*n);
+    thrust::device_vector<float> d_sigma_f32(n);
+    thrust::device_vector<float> d_P_f32((long long)n*n);
+    thrust::device_vector<float> d_U_f32((long long)sketch_rows*n);
+    thrust::device_vector<double> d_P((long long)n*n);
+    thrust::device_vector<double> d_A1((long long)m*n);
+    thrust::device_vector<double> d_B((long long)m*n);
+    thrust::device_vector<double> d_G(n*n), d_M(n*n), d_eig(n), d_Dinv(n), d_rsqrt(n);
+    thrust::device_vector<double> d_R1(n*n);
+
+    int8_t* pD = thrust::raw_pointer_cast(d_D.data());
+    int* pS = thrust::raw_pointer_cast(d_S.data());
+    float* pFA = thrust::raw_pointer_cast(d_FA.data());
+    cufftComplex* pFft = thrust::raw_pointer_cast(d_fft.data());
+    float* pSk = thrust::raw_pointer_cast(d_sk.data());
+    float* pVT_f32 = thrust::raw_pointer_cast(d_VT_f32.data());
+    float* pSigma_f32 = thrust::raw_pointer_cast(d_sigma_f32.data());
+    float* pP_f32 = thrust::raw_pointer_cast(d_P_f32.data());
+    float* pU_f32 = thrust::raw_pointer_cast(d_U_f32.data());
+    double* pA1 = thrust::raw_pointer_cast(d_A1.data());
+    double* pP = thrust::raw_pointer_cast(d_P.data());
+    double* pB = thrust::raw_pointer_cast(d_B.data());
+    double* pG = thrust::raw_pointer_cast(d_G.data());
+    double* pM = thrust::raw_pointer_cast(d_M.data());
+    double* peig = thrust::raw_pointer_cast(d_eig.data());
+    double* pDinv = thrust::raw_pointer_cast(d_Dinv.data());
+    double* prsqrt = thrust::raw_pointer_cast(d_rsqrt.data());
+    double* pR1 = thrust::raw_pointer_cast(d_R1.data());
+    double* pAbak = thrust::raw_pointer_cast(d_Abak.data());
+
+    int lw_ev = 0;
+    double* d_wev = nullptr;
+    int* d_iev = nullptr;
+    CUSOLVER_CHECK(cusolverDnDsyevd_bufferSize(
+        solver, CUSOLVER_EIG_MODE_VECTOR, CUBLAS_FILL_MODE_LOWER,
+        n, pG, n, peig, &lw_ev));
+    CUDA_CHECK(cudaMalloc(&d_wev, lw_ev*sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_iev, sizeof(int)));
+
+    cufftHandle fp;
+    int fn[1] = {m};
+    CUFFT_CHECK(cufftPlanMany(&fp, 1, fn, fn, 1, m, fn, 1, half_r, CUFFT_R2C, n));
+
+    int lw_svd = 0;
+    float* d_wsvd = nullptr;
+    gesvdjInfo_t gesvdj_params = nullptr;
+    cusolverDnParams_t gesvdp_params = nullptr;
+    size_t gesvdp_device_bytes = 0, gesvdp_host_bytes = 0;
+    void* d_gesvdp_work = nullptr;
+    std::vector<unsigned char> h_gesvdp_work;
+    thrust::device_vector<int> d_svd_info(1);
+    int* p_svd_info = thrust::raw_pointer_cast(d_svd_info.data());
+    int svd_info = 0;
+    double gesvdp_err_sigma = 0.;
+
+    if (svd_kind == MRSQR2Svd::Gesvd) {
+        CUSOLVER_CHECK(cusolverDnSgesvd_bufferSize(solver, sketch_rows, n, &lw_svd));
+        CUDA_CHECK(cudaMalloc(&d_wsvd, lw_svd*sizeof(float)));
+    } else if (svd_kind == MRSQR2Svd::Gesvdj) {
+        CUSOLVER_CHECK(cusolverDnCreateGesvdjInfo(&gesvdj_params));
+        CUSOLVER_CHECK(cusolverDnXgesvdjSetTolerance(gesvdj_params, 1e-7));
+        CUSOLVER_CHECK(cusolverDnXgesvdjSetMaxSweeps(gesvdj_params, 20));
+        CUSOLVER_CHECK(cusolverDnSgesvdj_bufferSize(
+            solver, CUSOLVER_EIG_MODE_VECTOR, 1, sketch_rows, n, pSk, sketch_rows,
+            pSigma_f32, pU_f32, sketch_rows, pVT_f32, n, &lw_svd, gesvdj_params));
+        CUDA_CHECK(cudaMalloc(&d_wsvd, lw_svd*sizeof(float)));
+    } else {
+        CUSOLVER_CHECK(cusolverDnCreateParams(&gesvdp_params));
+        CUSOLVER_CHECK(cusolverDnXgesvdp_bufferSize(
+            solver, gesvdp_params, CUSOLVER_EIG_MODE_VECTOR, 1,
+            sketch_rows, n, CUDA_R_32F, pSk, sketch_rows,
+            CUDA_R_32F, pSigma_f32, CUDA_R_32F, pU_f32, sketch_rows,
+            CUDA_R_32F, pVT_f32, n, CUDA_R_32F,
+            &gesvdp_device_bytes, &gesvdp_host_bytes));
+        CUDA_CHECK(cudaMalloc(&d_gesvdp_work, gesvdp_device_bytes));
+        h_gesvdp_work.resize(gesvdp_host_bytes);
+    }
+
+    auto one_trial = [&]() {
+        double* pA = thrust::raw_pointer_cast(d_A.data());
+        thrust::transform(thrust::counting_iterator<unsigned>(0),
+                          thrust::counting_iterator<unsigned>(m), d_D.begin(), RandRadI8());
+        thrust::transform(thrust::counting_iterator<unsigned>(0),
+                          thrust::counting_iterator<unsigned>(c), d_S.begin(), RandSamp{m});
+
+        diag_fp32<<<grd, blk>>>(pA, pD, pFA, m, n);
+        CUDA_CHECK(cudaGetLastError());
+        CUFFT_CHECK(cufftExecR2C(fp, pFA, pFft));
+
+        if (re_only)
+            thrust::transform(thrust::counting_iterator<int>(0),
+                              thrust::counting_iterator<int>(sketch_rows*n), d_sk.begin(),
+                              SelF32_Re{pFft, pS, c, m, half_r});
+        else
+            thrust::transform(thrust::counting_iterator<int>(0),
+                              thrust::counting_iterator<int>(sketch_rows*n), d_sk.begin(),
+                              SelF32{pFft, pS, c, m, half_r});
+        thrust::transform(d_sk.begin(), d_sk.end(), d_sk.begin(),
+                          [norm] __device__ (float x) { return x*norm; });
+
+        if (svd_kind == MRSQR2Svd::Gesvd) {
+            CUSOLVER_CHECK(cusolverDnSgesvd(
+                solver, 'N', 'A', sketch_rows, n, pSk, sketch_rows,
+                pSigma_f32, nullptr, 1, pVT_f32, n, d_wsvd, lw_svd,
+                nullptr, &svd_info));
+            if (svd_info != 0)
+                throw std::runtime_error("cusolverDnSgesvd failed");
+        } else if (svd_kind == MRSQR2Svd::Gesvdj) {
+            CUSOLVER_CHECK(cusolverDnSgesvdj(
+                solver, CUSOLVER_EIG_MODE_VECTOR, 1, sketch_rows, n, pSk, sketch_rows,
+                pSigma_f32, pU_f32, sketch_rows, pVT_f32, n, d_wsvd, lw_svd,
+                p_svd_info, gesvdj_params));
+        } else {
+            CUSOLVER_CHECK(cusolverDnXgesvdp(
+                solver, gesvdp_params, CUSOLVER_EIG_MODE_VECTOR, 1,
+                sketch_rows, n, CUDA_R_32F, pSk, sketch_rows,
+                CUDA_R_32F, pSigma_f32, CUDA_R_32F, pU_f32, sketch_rows,
+                CUDA_R_32F, pVT_f32, n, CUDA_R_32F,
+                d_gesvdp_work, gesvdp_device_bytes,
+                h_gesvdp_work.data(), gesvdp_host_bytes,
+                p_svd_info, &gesvdp_err_sigma));
+        }
+        CUDA_CHECK(cudaDeviceSynchronize());
+        int svd_status = svd_info;
+        if (svd_kind != MRSQR2Svd::Gesvd)
+            CUDA_CHECK(cudaMemcpy(&svd_status, p_svd_info, sizeof(int), cudaMemcpyDeviceToHost));
+        if (svd_status != 0)
+            throw std::runtime_error("FP32 randomized SVD returned nonzero info");
+        h_err = gesvdp_err_sigma;
+
+        const bool gesvd_output_is_vt = (svd_kind == MRSQR2Svd::Gesvd);
+        thrust::transform(
+            thrust::counting_iterator<int>(0),
+            thrust::counting_iterator<int>(n*n), d_P_f32.begin(),
+            [pVT_f32, pSigma_f32, n, gesvd_output_is_vt] __device__ (int k) {
+                const int row = k % n;
+                const int col = k / n;
+                const int source = gesvd_output_is_vt ? col + n*row : k;
+                return pVT_f32[source] / pSigma_f32[col];
+            });
+        thrust::transform(d_P_f32.begin(), d_P_f32.end(), d_P.begin(),
+                          [] __device__ (float x) { return (double)x; });
+
+        CUBLAS_CHECK(cublasDgemm(blas, CUBLAS_OP_N, CUBLAS_OP_N, m, n, n,
+                                 &one, pA, m, pP, n, &zero, pA1, m));
+        svqb_pass(blas, solver, pA1, pB, m, n, pG, peig, pDinv, prsqrt,
+                  pM, d_wev, lw_ev, d_iev);
+    };
+
+    thrust::copy(d_Abak.begin(), d_Abak.end(), d_A.begin());
+    one_trial();
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    cudaStream_t stream;
+    CUDA_CHECK(cudaStreamCreate(&stream));
+    CUBLAS_CHECK(cublasSetStream(blas, stream));
+    CUSOLVER_CHECK(cusolverDnSetStream(solver, stream));
+    CUFFT_CHECK(cufftSetStream(fp, stream));
+    EV wall;
+    wall.start(stream);
+    for (int t = 0; t < trials; ++t) {
+        thrust::copy(d_Abak.begin(), d_Abak.end(), d_A.begin());
+        one_trial();
+    }
+    time_s = wall.stop(stream) / trials;
+
+    CUBLAS_CHECK(cublasDgemm(blas, CUBLAS_OP_T, CUBLAS_OP_N, n, n, m,
+                             &one, pB, m, pAbak, m, &zero, pR1, n));
+    thrust::copy(d_R1.begin(), d_R1.end(), h_R);
+    thrust::copy(d_B.begin(), d_B.begin() + (long long)m*n, h_Q);
+
+    cufftDestroy(fp);
+    cudaFree(d_wsvd);
+    if (gesvdj_params) CUSOLVER_CHECK(cusolverDnDestroyGesvdjInfo(gesvdj_params));
+    if (gesvdp_params) CUSOLVER_CHECK(cusolverDnDestroyParams(gesvdp_params));
+    cudaFree(d_gesvdp_work);
+    cudaFree(d_wev);
+    cudaFree(d_iev);
+    cublasDestroy(blas);
+    cusolverDnDestroy(solver);
+    CUDA_CHECK(cudaStreamDestroy(stream));
+}
+
+void mrsqr2_fp32(const double* h_A, int m, int n, int c,
+                 double* h_Q, double* h_R, double& time_s, int trials, bool re_only)
+{
+    double h_err = 0.;
+    mrsqr2_fp32_impl(h_A, m, n, c, h_Q, h_R, time_s, trials, re_only,
+                     MRSQR2Svd::Gesvd, h_err);
+}
+
+void mrsqr2_gesvdj_fp32(const double* h_A, int m, int n, int c,
+                        double* h_Q, double* h_R, double& time_s,
                         int trials, bool re_only)
 {
-    mrsqr2_fp64_impl(h_A, m, n, c, h_Q, h_R, time_s, trials, re_only,
-                     MRSQR2Svd::Gesvdp);
+    double h_err = 0.;
+    mrsqr2_fp32_impl(h_A, m, n, c, h_Q, h_R, time_s, trials, re_only,
+                     MRSQR2Svd::Gesvdj, h_err);
+}
+
+void mrsqr2_gesvdp_fp32(const double* h_A, int m, int n, int c,
+                        double* h_Q, double* h_R, double& time_s,
+                        int trials, bool re_only, double* h_err)
+{
+    double err = 0.;
+    mrsqr2_fp32_impl(h_A, m, n, c, h_Q, h_R, time_s, trials, re_only,
+                     MRSQR2Svd::Gesvdp, err);
+    if (h_err) *h_err = err;
 }

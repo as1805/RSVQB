@@ -82,12 +82,17 @@ void cholqr2(const double* h_A, int m, int n,
     one(); CUDA_CHECK(cudaDeviceSynchronize());
 
     // Timed trials (host↔device copies excluded)
-    EV wall; wall.start();
+    cudaStream_t stream;
+CUDA_CHECK(cudaStreamCreate(&stream));
+
+CUBLAS_CHECK(cublasSetStream(blas, stream));
+CUSOLVER_CHECK(cusolverDnSetStream(solver, stream));
+    EV wall; wall.start(stream);
     for (int t = 0; t < trials; ++t) {
         thrust::copy(d_Abak.begin(), d_Abak.end(), d_A.begin());
         one();
     }
-    time_s = wall.stop() / trials;
+    time_s = wall.stop(stream) / trials;
 
     // Compute R = R₂ · R₁ (NOT timed)
     thrust::for_each(thrust::counting_iterator<int>(0),
